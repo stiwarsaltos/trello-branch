@@ -14,10 +14,97 @@
   "contributes": {
     "commands": [
       {
-        "command": "trello-branch.helloWorld",
-        "title": "Hello World"
+        "command": "trelloBranch.login",
+        "title": "Trello: Iniciar sesión"
+      },
+      {
+        "command": "trelloBranch.logout",
+        "title": "Trello: Cerrar sesión"
+      },
+      {
+        "command": "trelloBranch.startTask",
+        "title": "Trello: Empezar tarea"
+      },
+      {
+        "command": "trelloBranch.finishTask",
+        "title": "Trello: Terminar tarea"
+      },
+      {
+        "command": "trelloBranch.copyCardText",
+        "title": "Trello: Copiar texto de tarjeta"
+      },
+      {
+        "command": "trelloBranch.selectList",
+        "title": "Trello: Seleccionar lista"
+      },
+      {
+        "command": "trelloBranch.showLog",
+        "title": "Trello: Ver registro"
+      },
+      {
+        "command": "trelloBranch.refreshView",
+        "title": "Trello: Actualizar vista",
+        "icon": "$(refresh)"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "trelloBranch",
+          "title": "Trello Branch",
+          "icon": "resources/trello.svg"
+        }
+      ]
+    },
+    "views": {
+      "trelloBranch": [
+        {
+          "id": "trelloBranch.tasks",
+          "name": "Tareas"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "trelloBranch.selectList",
+          "when": "view == trelloBranch.tasks",
+          "group": "navigation@1"
+        },
+        {
+          "command": "trelloBranch.refreshView",
+          "when": "view == trelloBranch.tasks",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Trello Branch",
+      "properties": {
+        "trelloBranch.listId": {
+          "type": "string",
+          "description": "ID de la lista. Usa el comando 'Trello: Seleccionar lista' para elegirla."
+        },
+        "trelloBranch.developerName": {
+          "type": "string",
+          "description": "Prefijo de la rama. Si está vacío, se usa el primer nombre del perfil de Trello."
+        },
+        "trelloBranch.baseBranch": {
+          "type": "string",
+          "default": "develop",
+          "description": "Rama base desde la que se crea la nueva rama"
+        },
+        "trelloBranch.githubToken": {
+          "type": "string"
+        },
+        "trelloBranch.repoOwner": {
+          "type": "string"
+        },
+        "trelloBranch.repoName": {
+          "type": "string"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
@@ -34,19 +121,23 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.125.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
-    "typescript-eslint": "^8.61.1",
-    "eslint": "^10.5.0",
+    "@types/vscode": "^1.125.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0",
     "esbuild": "^0.28.1",
+    "eslint": "^10.5.0",
     "npm-run-all": "^4.1.5",
     "typescript": "^6.0.3",
-    "@vscode/test-cli": "^0.0.15",
-    "@vscode/test-electron": "^3.0.0"
+    "typescript-eslint": "^8.61.1"
   },
   "overrides": {
     "diff": "^8.0.4",
     "serialize-javascript": "^7.0.6"
+  },
+  "dependencies": {
+    "axios": "^1.19.0",
+    "simple-git": "^3.36.0"
   }
 }
