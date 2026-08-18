@@ -1,71 +1,54 @@
-# trello-branch README
+# Trello Branch
 
-This is the README for your extension "trello-branch". After writing up a brief description, we recommend including the following sections.
+Extensión para Cursor/VS Code que conecta tarjetas de Trello con ramas Git: empezar tarea, code review del proyecto, commit, push y PR.
 
-## Features
+## Quick path
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+1. Instala el `.vsix` (**Extensions: Install from VSIX…**).
+2. Abre un repo con `package.json` (front) o `composer.json` (API).
+3. Si la tarea toca API y cliente: configura `trelloBranch.companionRepoPath` al path del otro repo (ventanas separadas).
+4. En la vista **Trello Branch**: inicia sesión → elige lista → empieza una tarea (solo este / este + companion).
+5. Al terminar en cada ventana: code review en terminal → commit + push + PR. La tarjeta avanza cuando todos los repos de la tarea están cerrados.
 
-For example if there is an image subfolder under your extension project workspace:
+## Qué hace
 
-\!\[feature X\]\(images/feature-x.png\)
+| Acción | Resultado |
+|--------|-----------|
+| Empezar tarea | Crea `Dev/Modulo-Submodulo` desde `develop` (configurable) y mueve la tarjeta a la siguiente lista |
+| Rama ya existe | Pide un nombre alternativo |
+| Terminar tarea | Code review en consola → commit + push + PR (`gh`) → vuelve a la rama base |
+| Vista lateral | Cuenta, tarea activa (detalle + imágenes), lista y tareas asignadas |
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+La descripción de la tarjeta debe incluir `Modulo:` y `Submodulo:` (también usa `Descripción:` / `Ejemplo:`).
 
-## Requirements
+## Requisitos
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+- Cursor o VS Code
+- Cuenta de Trello (login con token)
+- Repo Git local
+- GitHub CLI (`gh`) autenticado, para crear el PR
+- Script `code-review` en `package.json` (front) o `composer.json` (API)
 
-## Extension Settings
+## Configuración
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+| Setting | Uso |
+|---------|-----|
+| `trelloBranch.listId` | Lista de origen (también con **Trello: Seleccionar lista**) |
+| `trelloBranch.developerName` | Prefijo de rama; si vacío, primer nombre del perfil Trello |
+| `trelloBranch.baseBranch` | Rama base (default: `develop`) |
+| `trelloBranch.companionRepoPath` | Path absoluto del otro repo (API/cliente) para tareas duales |
 
-For example:
+## Empaquetar
 
-This extension contributes the following settings:
+```bash
+npm run package
+npx @vscode/vsce package
+```
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+Instala el `.vsix` generado con **Extensions: Install from VSIX…**.
 
-## Known Issues
+## Notas
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
-
-## Release Notes
-
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
-
----
-
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+- El token de Trello se guarda en Secret Storage del editor.
+- Las imágenes de la tarea activa se pueden previsualizar desde el árbol.
+- Si el code review falla (exit ≠ 0), no se hace commit/push/PR.

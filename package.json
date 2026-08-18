@@ -1,8 +1,14 @@
 {
   "name": "trello-branch",
   "displayName": "trello-branch",
-  "description": "",
+  "publisher": "stiwarsaltos-dev",
+  "description": "Conecta tarjetas de Trello con ramas Git: empezar tarea, code review, commit, push y PR.",
   "version": "0.0.1",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stiwarsaltos/trello-branch.git"
+  },
   "engines": {
     "vscode": "^1.125.0"
   },
@@ -33,6 +39,11 @@
         "command": "trelloBranch.copyCardText",
         "title": "Trello: Copiar texto de tarjeta"
       },
+      {
+        "command": "trelloBranch.previewCardImage",
+        "title": "Trello: Previsualizar imagen"
+      },
+
       {
         "command": "trelloBranch.selectList",
         "title": "Trello: Seleccionar lista"
@@ -93,6 +104,11 @@
           "type": "string",
           "default": "develop",
           "description": "Rama base desde la que se crea la nueva rama"
+        },
+        "trelloBranch.companionRepoPath": {
+          "type": "string",
+          "default": "",
+          "description": "Ruta absoluta del otro repo (API o cliente) para tareas que tocan ambos. Vacío = solo el repo de la ventana actual."
         },
         "trelloBranch.githubToken": {
           "type": "string"

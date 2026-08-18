@@ -23,6 +23,15 @@ export type TrelloList = {
   name: string;
 };
 
+export type TrelloAttachment = {
+  id: string;
+  name: string;
+  url: string;
+  mimeType: string;
+  bytes?: number;
+  isUpload?: boolean;
+};
+
 export async function getMe(apiKey: string, token: string) {
   const { data } = await axios.get("https://api.trello.com/1/members/me", {
     params: { key: apiKey, token, fields: "id,username,fullName" }
@@ -59,6 +68,68 @@ export async function getCard(apiKey: string, token: string, cardId: string) {
     params: { key: apiKey, token, fields: "name,desc,idList,idMembers" }
   });
   return data as TrelloCard & { idList: string };
+}
+
+export async function getCardAttachments(
+  apiKey: string,
+  token: string,
+  cardId: string
+) {
+  const { data } = await axios.get(
+    `https://api.trello.com/1/cards/${cardId}/attachments`,
+    { params: { key: apiKey, token } }
+  );
+  return data as TrelloAttachment[];
+}
+
+/** Adjuntos de imagen de una tarjeta (mime image/* o extensión conocida). */
+export async function getCardImageAttachments(
+  apiKey: string,
+  token: string,
+  cardId: string
+) {
+  const attachments = await getCardAttachments(apiKey, token, cardId);
+  return attachments.filter(isImageAttachment);
+}
+
+/**
+ * Descarga un adjunto. Subidas en Trello: ruta /download/ con header
+ * OAuth (key/token por query ya no autentican). Enlaces externos: GET a url.
+ */
+export async function downloadAttachment(
+  apiKey: string,
+  token: string,
+  attachment: Pick<
+    TrelloAttachment,
+    "id" | "name" | "url" | "isUpload"
+  > & { cardId: string }
+) {
+  const { data, headers } =
+    attachment.isUpload === false
+      ? await axios.get(attachment.url, { responseType: "arraybuffer" })
+      : await axios.get(
+          `https://api.trello.com/1/cards/${attachment.cardId}/attachments/` +
+            `${attachment.id}/download/${encodeURIComponent(attachment.name)}`,
+          {
+            responseType: "arraybuffer",
+            headers: {
+              Authorization:
+                `OAuth oauth_consumer_key="${apiKey}", oauth_token="${token}"`,
+            },
+          }
+        );
+  const mimeType =
+    typeof headers["content-type"] === "string"
+      ? headers["content-type"].split(";")[0].trim()
+      : "application/octet-stream";
+  return { bytes: Buffer.from(data), mimeType };
+}
+
+function isImageAttachment(attachment: TrelloAttachment) {
+  if (attachment.mimeType?.startsWith("image/")) {
+    return true;
+  }
+  return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(attachment.name ?? "");
 }
 
 /** Tarjetas de la lista asignadas al miembro autenticado. */

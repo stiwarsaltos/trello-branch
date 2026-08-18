@@ -47,6 +47,13 @@ export function hasBase(branches: RepoBranches, baseBranch: string) {
   );
 }
 
+export function branchExists(branches: RepoBranches, name: string) {
+  return (
+    branches.locals.includes(name) ||
+    branches.remotes.includes(`origin/${name}`)
+  );
+}
+
 export async function createLocalBranch(
   repoPath: string,
   branchName: string,
@@ -55,7 +62,7 @@ export async function createLocalBranch(
   const git = simpleGit(repoPath);
   const branches = await getRepoBranches(repoPath);
 
-  if (branches.locals.includes(branchName)) {
+  if (branchExists(branches, branchName)) {
     throw new Error(`La rama "${branchName}" ya existe.`);
   }
 

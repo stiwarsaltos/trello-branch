@@ -2,7 +2,25 @@ import * as vscode from "vscode";
 import { getStoredToken, TRELLO_APP_KEY } from "./auth";
 import { formatMetaLine, parseCardMeta } from "./cardMeta";
 import { getActiveTask } from "./taskState";
-import { getAssignedCards, getList, getMe, TrelloCard } from "./trello";
+
+function repoStatusIcon(status: string) {
+  if (status === "done") {
+    return "pass";
+  }
+  if (status === "skipped") {
+    return "circle-slash";
+  }
+  return "circle-outline";
+}
+import {
+  getAssignedCards,
+  getCard,
+  getCardImageAttachments,
+  getList,
+  getMe,
+  TrelloAttachment,
+  TrelloCard,
+} from "./trello";
 
 class TrelloNode extends vscode.TreeItem {
   constructor(
@@ -52,14 +70,53 @@ function copyableTextNode(kind: string, text: string, icon: string) {
   return item;
 }
 
-function taskNode(card: TrelloCard) {
-  const meta = parseCardMeta(card.desc ?? "");
-  const metaLine = formatMetaLine(meta);
+function cardInfoChildren(desc: string) {
+  const meta = parseCardMeta(desc ?? "");
   const descripcion = meta.descripcion ?? "Sin descripción";
   const ejemplo = meta.ejemplo ?? "Sin ejemplo";
-  const children: TrelloNode[] = [
+  const metaLine = formatMetaLine(meta) ?? "Sin módulo/submódulo";
+
+  return [
+    infoNode(metaLine, "symbol-namespace", metaLine),
     copyableTextNode("Descripción", descripcion, "note"),
     copyableTextNode("Ejemplo", ejemplo, "lightbulb"),
+  ];
+}
+
+function imageNodes(cardId: string, images: TrelloAttachment[]) {
+  if (images.length === 0) {
+    return [infoNode("Sin imágenes adjuntas", "file-media")];
+  }
+
+  return [
+    new TrelloNode(
+      `Imágenes (${images.length})`,
+      vscode.TreeItemCollapsibleState.Collapsed,
+      images.map(image => {
+        const item = actionNode(
+          image.name || "Imagen",
+          "trelloBranch.previewCardImage",
+          "file-media",
+          {
+            cardId,
+            attachmentId: image.id,
+            name: image.name || "imagen",
+            url: image.url,
+            isUpload: image.isUpload,
+            mimeType: image.mimeType,
+          }
+        );
+        item.tooltip = "Clic para previsualizar";
+        return item;
+      })
+    ),
+  ];
+}
+
+function taskNode(card: TrelloCard) {
+  const meta = parseCardMeta(card.desc ?? "");
+  const children: TrelloNode[] = [
+    ...cardInfoChildren(card.desc ?? ""),
     actionNode(
       "Empezar esta tarea",
       "trelloBranch.startSelectedTask",
@@ -73,7 +130,7 @@ function taskNode(card: TrelloCard) {
     vscode.TreeItemCollapsibleState.Collapsed,
     children
   );
-  item.description = metaLine ?? "Sin módulo/submódulo";
+  item.description = formatMetaLine(meta) ?? "Sin módulo/submódulo";
   item.iconPath = new vscode.ThemeIcon(
     meta.modulo && meta.submodulo ? "issues" : "warning"
   );
@@ -131,25 +188,65 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
       account.description = "Trello";
       account.iconPath = new vscode.ThemeIcon("account");
 
-      const active = getActiveTask(this.context.workspaceState);
-      const activeNode = active
-        ? new TrelloNode(
-            `En curso: ${active.cardName}`,
-            vscode.TreeItemCollapsibleState.Expanded,
-            [
-              infoNode(active.branchName, "git-branch"),
-              actionNode(
-                "Terminar tarea",
-                "trelloBranch.finishTask",
-                "pass-filled"
-              ),
-            ]
-          )
-        : new TrelloNode(
-            "Sin tarea activa",
-            vscode.TreeItemCollapsibleState.None
+      const active = getActiveTask(
+        this.context.globalState,
+        this.context.workspaceState
+      );
+      let activeNode: TrelloNode;
+      if (active) {
+        let cardDesc = active.cardDesc ?? "";
+        let images: TrelloAttachment[] = [];
+        try {
+          const [card, imageAttachments] = await Promise.all([
+            getCard(TRELLO_APP_KEY, token, active.cardId),
+            getCardImageAttachments(TRELLO_APP_KEY, token, active.cardId),
+          ]);
+          cardDesc = card.desc ?? cardDesc;
+          images = imageAttachments;
+        } catch {
+          // Usa la descripción guardada si la API falla.
+        }
+
+        const meta = parseCardMeta(cardDesc);
+        const repoNodes = active.repos.map(repo => {
+          const label =
+            repo.status === "done" && repo.prUrl
+              ? `${repo.label} — PR`
+              : `${repo.label} — ${repo.status}`;
+          const node = infoNode(
+            label,
+            repoStatusIcon(repo.status),
+            repo.prUrl || repo.root
           );
-      activeNode.iconPath = new vscode.ThemeIcon(active ? "play-circle" : "circle-outline");
+          return node;
+        });
+
+        activeNode = new TrelloNode(
+          `En curso: ${active.cardName}`,
+          vscode.TreeItemCollapsibleState.Expanded,
+          [
+            ...cardInfoChildren(cardDesc),
+            infoNode(active.branchName, "git-branch", active.branchName),
+            ...repoNodes,
+            ...imageNodes(active.cardId, images),
+            actionNode(
+              "Terminar en este repo",
+              "trelloBranch.finishTask",
+              "pass-filled"
+            ),
+          ]
+        );
+        activeNode.description =
+          formatMetaLine(meta) ?? "Sin módulo/submódulo";
+      } else {
+        activeNode = new TrelloNode(
+          "Sin tarea activa",
+          vscode.TreeItemCollapsibleState.None
+        );
+      }
+      activeNode.iconPath = new vscode.ThemeIcon(
+        active ? "play-circle" : "circle-outline"
+      );
 
       const listId = vscode.workspace
         .getConfiguration("trelloBranch")
