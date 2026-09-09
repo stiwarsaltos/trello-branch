@@ -10,15 +10,17 @@ import {
 import { getAssignedCards, getBoards, getCard, getLists, moveCardToNextList } from "./trello";
 import {
   branchExists,
+  changeFileCount,
   checkoutBranch,
-  commitAllChanges,
-  createLocalBranch,
+  commitStaged,
+  createBranchFromCurrent,
   createPullRequest,
   getChangeSummary,
   getRepoBranches,
   hasBase,
   pushBranch,
   RepoBranches,
+  stageAllChanges,
 } from "./github";
 import {
   ActiveRepo,
@@ -30,13 +32,20 @@ import {
   pendingRepoLabels,
   repoLabel,
   saveActiveTask,
+  sameRepoRoot,
   updateActiveRepo,
 } from "./taskState";
 import { TrelloTreeProvider } from "./treeView";
 import { formatMetaLine, parseCardMeta } from "./cardMeta";
+import { buildCommitFromDiff } from "./commitMessage";
 import { runProjectCodeReview } from "./codeReview";
 import { previewCardImage } from "./imagePreview";
 import { resolveCodeReviewRunner } from "./projectManifest";
+import {
+  clearCompanionPath,
+  getCompanionPath,
+  pickAndSaveCompanionPath,
+} from "./companionConfig";
 
 const log = vscode.window.createOutputChannel("Trello Branch");
 
@@ -180,35 +189,58 @@ async function resolveBranchName(
   }
 }
 
-async function pickTaskScope(currentRoot: string, companionPath: string) {
-  const currentLabel = repoLabel(currentRoot);
-  const items: Array<{
-    label: string;
-    description?: string;
-    roots: string[];
-  }> = [
-    {
-      label: `Solo este repo (${currentLabel})`,
-      description: currentRoot,
-      roots: [currentRoot],
-    },
-  ];
+type RepoScan = {
+  root: string;
+  label: string;
+  hasChanges: boolean;
+  fileCount: number;
+};
 
-  if (companionPath) {
-    items.push({
-      label: "Este + companion (API y cliente)",
-      description: companionPath,
-      roots: [currentRoot, companionPath],
-    });
+async function listFinishCandidates(
+  currentRoot: string,
+  companionPath: string | undefined
+) {
+  const roots = [currentRoot];
+  if (companionPath && path.resolve(companionPath) !== path.resolve(currentRoot)) {
+    roots.push(path.resolve(companionPath));
   }
 
+  const scans: RepoScan[] = [];
+  for (const root of roots) {
+    const branches = await getRepoBranches(root);
+    const summary = await getChangeSummary(branches.root);
+    scans.push({
+      root: branches.root,
+      label: repoLabel(branches.root),
+      hasChanges: summary.hasChanges,
+      fileCount: changeFileCount(summary),
+    });
+  }
+  return scans;
+}
+
+/** Confirma qué repos cierran esta tarea. Por defecto marca los que tienen cambios. */
+async function confirmReposToClose(scans: RepoScan[]) {
+  const items = scans.map(scan => ({
+    label: scan.label,
+    description: scan.hasChanges
+      ? `${scan.fileCount} archivo(s) con cambios → rama + PR`
+      : "sin cambios → omitir",
+    detail: scan.root,
+    picked: scan.hasChanges,
+    scan,
+  }));
+
   const picked = await vscode.window.showQuickPick(items, {
-    title: "Alcance de la tarea",
-    placeHolder: companionPath
-      ? "¿Trabajas solo aquí o también en el companion?"
-      : "Configura trelloBranch.companionRepoPath para usar ambos repos",
+    title: "Repos a cerrar en esta tarea",
+    placeHolder: "Desmarca si los cambios no son de esta tarjeta",
+    canPickMany: true,
+    ignoreFocusOut: true,
   });
-  return picked?.roots;
+  if (!picked) {
+    return undefined;
+  }
+  return new Set(picked.map(item => path.resolve(item.scan.root)));
 }
 
 async function validateCompanionRepo(companionPath: string) {
@@ -273,15 +305,15 @@ function buildPrBody(active: ActiveTask) {
     `## Summary`,
     `- ${active.cardName}`,
     meta.modulo && meta.submodulo
-      ? `- Módulo: ${meta.modulo} → ${meta.submodulo}`
+      ? `- Module: ${meta.modulo} → ${meta.submodulo}`
       : undefined,
     "",
-    meta.descripcion ? `## Descripción\n\n${meta.descripcion}` : undefined,
-    meta.ejemplo ? `## Ejemplo\n\n${meta.ejemplo}` : undefined,
+    meta.descripcion ? `## Description\n\n${meta.descripcion}` : undefined,
+    meta.ejemplo ? `## Example\n\n${meta.ejemplo}` : undefined,
     "",
     "## Test plan",
-    "- [ ] Revisar el diff del PR",
-    "- [ ] Probar el flujo afectado",
+    "- [ ] Review the PR diff",
+    "- [ ] Test the affected flow",
   ]
     .filter(line => line !== undefined)
     .join("\n");
@@ -329,6 +361,63 @@ export function activate(context: vscode.ExtensionContext) {
     await pickListId(session.token);
     treeProvider.refresh();
   });
+
+  const setCompanionRepo = vscode.commands.registerCommand(
+    "trelloBranch.setCompanionRepo",
+    async () => {
+      trace("Comando: Configurar repo companion");
+      const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!workspacePath) {
+        vscode.window.showErrorMessage("No hay carpeta de proyecto abierta.");
+        return;
+      }
+
+      let currentRoot: string;
+      try {
+        currentRoot = (await getRepoBranches(workspacePath)).root;
+      } catch (error) {
+        reportError("No se pudo resolver el repo actual", error);
+        return;
+      }
+
+      const picked = await pickAndSaveCompanionPath(globalState, currentRoot);
+      if (!picked) {
+        return;
+      }
+
+      try {
+        await validateCompanionRepo(picked);
+      } catch (error) {
+        await clearCompanionPath(globalState, currentRoot);
+        reportError("Companion inválido", error);
+        return;
+      }
+
+      treeProvider.refresh();
+      vscode.window.showInformationMessage(
+        `Companion guardado para ${repoLabel(currentRoot)}: ${picked}`
+      );
+    }
+  );
+
+  const clearCompanionRepo = vscode.commands.registerCommand(
+    "trelloBranch.clearCompanionRepo",
+    async () => {
+      const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!workspacePath) {
+        return;
+      }
+      let currentRoot: string;
+      try {
+        currentRoot = (await getRepoBranches(workspacePath)).root;
+      } catch {
+        return;
+      }
+      await clearCompanionPath(globalState, currentRoot);
+      treeProvider.refresh();
+      vscode.window.showInformationMessage("Companion eliminado para este repo.");
+    }
+  );
 
   const startTaskHandler = async (selectedCardId?: string) => {
     trace("Comando: Empezar tarea");
@@ -439,95 +528,30 @@ export function activate(context: vscode.ExtensionContext) {
 
     const defaultBranchName =
       `${developer}/${toPascalCase(modulo)}-${toPascalCase(submodulo)}`;
-    const workspacePath = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
-    if (!workspacePath) {
-      vscode.window.showErrorMessage("No hay carpeta de proyecto abierta.");
-      return;
-    }
 
     try {
-      const currentBranches = await getRepoBranches(workspacePath);
-      const currentRoot = currentBranches.root;
-      trace(`Repo actual: ${currentRoot} | rama: ${currentBranches.current}`);
+      const moved = await moveCardToNextList(
+        TRELLO_APP_KEY, token, picked.id, listId!
+      );
+      trace(`Tarjeta movida: ${moved.from.name} → ${moved.to.name}`);
 
-      const companionSetting =
-        config.get<string>("companionRepoPath")?.trim() || "";
-      let companionRoot = "";
-      if (companionSetting) {
-        companionRoot = await validateCompanionRepo(companionSetting);
-        if (path.resolve(companionRoot) === path.resolve(currentRoot)) {
-          vscode.window.showErrorMessage(
-            "trelloBranch.companionRepoPath no puede ser el mismo repo que esta ventana."
-          );
-          return;
-        }
-      }
+      await saveActiveTask(globalState, {
+        cardId: picked.id,
+        cardName: picked.label,
+        cardDesc: picked.desc ?? "",
+        branchName: defaultBranchName,
+        repos: [],
+        startedAt: new Date().toISOString(),
+      });
+      await workspaceState.update("trelloBranch.activeTask", undefined);
+      treeProvider.refresh();
 
-      const scopeRoots = await pickTaskScope(currentRoot, companionRoot);
-      if (!scopeRoots?.length) {
-        return;
-      }
-
-      const configuredBase = config.get<string>("baseBranch") || "develop";
-      const branchLists: RepoBranches[] = [];
-      const repoPlans: Array<{ root: string; baseBranch: string }> = [];
-
-      for (const root of scopeRoots) {
-        const branches = await getRepoBranches(root);
-        branchLists.push(branches);
-        const baseBranch = await resolveBaseBranch(configuredBase, branches);
-        if (!baseBranch) {
-          return;
-        }
-        repoPlans.push({ root: branches.root, baseBranch });
-      }
-
-      const branchName = await resolveBranchName(defaultBranchName, branchLists);
-      if (!branchName) {
-        trace("Creación de rama cancelada (nombre no propuesto).");
-        return;
-      }
-
-      for (const plan of repoPlans) {
-        await createLocalBranch(plan.root, branchName, plan.baseBranch);
-        trace(`Rama creada: ${branchName} desde ${plan.baseBranch} en ${plan.root}`);
-      }
-
-      try {
-        const moved = await moveCardToNextList(
-          TRELLO_APP_KEY, token, picked.id, listId!
-        );
-        trace(`Tarjeta movida: ${moved.from.name} → ${moved.to.name}`);
-
-        const repos: ActiveRepo[] = repoPlans.map(plan => ({
-          root: plan.root,
-          label: repoLabel(plan.root),
-          status: "pending",
-        }));
-
-        await saveActiveTask(globalState, {
-          cardId: picked.id,
-          cardName: picked.label,
-          cardDesc: picked.desc ?? "",
-          branchName,
-          repos,
-          startedAt: new Date().toISOString(),
-        });
-        await workspaceState.update("trelloBranch.activeTask", undefined);
-        treeProvider.refresh();
-
-        const repoNames = repos.map(r => r.label).join(" + ");
-        vscode.window.showInformationMessage(
-          `Rama ${branchName} en ${repoNames}. Tarjeta en "${moved.to.name}".`
-        );
-      } catch (moveError) {
-        reportError(
-          `Rama creada (${branchName}), pero no se pudo mover la tarjeta`,
-          moveError
-        );
-      }
-    } catch (error) {
-      reportError("No se pudo crear la rama", error);
+      vscode.window.showInformationMessage(
+        `Tarea activa: "${picked.label}". Trabaja los cambios; al terminar ` +
+          `se detectan los repos con cambios (este y el companion).`
+      );
+    } catch (moveError) {
+      reportError("No se pudo mover la tarjeta", moveError);
     }
   };
 
@@ -616,48 +640,101 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
+    const alreadyHere = findActiveRepo(active, currentRoot);
+    if (alreadyHere && alreadyHere.status !== "pending") {
+      vscode.window.showInformationMessage(
+        `Este repo (${alreadyHere.label}) ya está ${alreadyHere.status}` +
+          (alreadyHere.prUrl ? `: ${alreadyHere.prUrl}` : ".")
+      );
+      return;
+    }
+
+    let companionRoot: string | undefined;
+    const savedCompanion = getCompanionPath(globalState, currentRoot);
+    if (savedCompanion) {
+      try {
+        companionRoot = await validateCompanionRepo(savedCompanion);
+      } catch (error) {
+        trace(`Companion no usable: ${errorMessage(error)}`);
+        vscode.window.showWarningMessage(
+          `No se pudo usar el companion: ${errorMessage(error)}. Se revisa solo este repo.`
+        );
+      }
+    }
+
+    let scans: RepoScan[];
+    try {
+      scans = await listFinishCandidates(currentRoot, companionRoot);
+    } catch (error) {
+      reportError("No se pudieron revisar los repos", error);
+      return;
+    }
+
+    const closed = active.repos.filter(
+      r => r.status === "done" || r.status === "skipped"
+    );
+    const openScans = scans.filter(
+      scan => !closed.some(r => sameRepoRoot(r.root, scan.root))
+    );
+
+    if (openScans.length === 0) {
+      vscode.window.showInformationMessage(
+        "No hay repos pendientes por cerrar en esta tarea."
+      );
+      return;
+    }
+
+    const selectedRoots = await confirmReposToClose(openScans);
+    if (!selectedRoots) {
+      return;
+    }
+
+    const nextRepos: ActiveRepo[] = [
+      ...closed,
+      ...openScans.map(scan => ({
+        root: scan.root,
+        label: scan.label,
+        status:
+          selectedRoots.has(path.resolve(scan.root)) && scan.hasChanges
+            ? ("pending" as const)
+            : ("skipped" as const),
+      })),
+    ];
+    active = { ...active, repos: nextRepos };
+    await saveActiveTask(globalState, active);
+    treeProvider.refresh();
+
     const activeRepo = findActiveRepo(active, currentRoot);
     if (!activeRepo) {
       vscode.window.showWarningMessage(
-        `Esta ventana (${repoLabel(currentRoot)}) no forma parte de la tarea "${active.cardName}". ` +
-          `Repos de la tarea: ${active.repos.map(r => r.label).join(", ")}.`
+        `Esta ventana (${repoLabel(currentRoot)}) no quedó en el cierre de "${active.cardName}".`
       );
       return;
     }
 
-    if (activeRepo.status !== "pending") {
-      vscode.window.showInformationMessage(
-        `Este repo (${activeRepo.label}) ya está ${activeRepo.status}` +
-          (activeRepo.prUrl ? `: ${activeRepo.prUrl}` : ".")
-      );
-      return;
-    }
-
-    let summary;
-    try {
-      await checkoutBranch(currentRoot, active.branchName);
-      summary = await getChangeSummary(currentRoot);
-    } catch (error) {
-      reportError("No se pudo revisar los cambios", error);
-      return;
-    }
-
-    let prUrl: string | undefined;
-
-    if (!summary.hasChanges) {
-      const continueEmpty = await vscode.window.showWarningMessage(
-        `No hay cambios en ${activeRepo.label}. ¿Marcar este repo como omitido?`,
-        "Omitir este repo",
-        "Cancelar"
-      );
-      if (continueEmpty !== "Omitir este repo") {
+    if (activeRepo.status === "skipped") {
+      trace(`Repo omitido en esta ventana: ${activeRepo.label}`);
+    } else {
+      const currentBranches = await getRepoBranches(currentRoot);
+      const branchName = await resolveBranchName(active.branchName, [currentBranches]);
+      if (!branchName) {
+        trace("Creación de rama cancelada al terminar.");
         return;
       }
-      active = await updateActiveRepo(globalState, active, currentRoot, {
-        status: "skipped",
-      });
-      trace(`Repo omitido (sin cambios): ${activeRepo.label}`);
-    } else {
+      if (branchName !== active.branchName) {
+        active = { ...active, branchName };
+        await saveActiveTask(globalState, active);
+        trace(`Nombre de rama actualizado: ${branchName}`);
+      }
+
+      try {
+        await createBranchFromCurrent(currentRoot, branchName);
+        trace(`Rama creada: ${branchName} en ${currentRoot}`);
+      } catch (error) {
+        reportError("No se pudo crear la rama", error);
+        return;
+      }
+
       let review;
       try {
         review = await vscode.window.withProgress(
@@ -707,15 +784,8 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       const taskSnapshot = active;
-      const meta = parseCardMeta(taskSnapshot.cardDesc ?? "");
-      const commitMessage = [
-        taskSnapshot.cardName,
-        "",
-        meta.descripcion ? meta.descripcion.slice(0, 400) : undefined,
-      ]
-        .filter(Boolean)
-        .join("\n");
 
+      let prUrl: string | undefined;
       try {
         await vscode.window.withProgress(
           {
@@ -723,9 +793,14 @@ export function activate(context: vscode.ExtensionContext) {
             title: `Commit, push y PR en ${activeRepo.label}...`,
           },
           async () => {
-            await commitAllChanges(currentRoot, commitMessage);
+            const staged = await stageAllChanges(currentRoot);
+            const commitMessage = await buildCommitFromDiff(
+              staged,
+              currentRoot
+            );
+            await commitStaged(currentRoot, commitMessage);
             trace(
-              `Commit creado en ${taskSnapshot.branchName} (${activeRepo.label})`
+              `Commit creado en ${taskSnapshot.branchName} (${activeRepo.label}): ${commitMessage.split("\n")[0]}`
             );
             await pushBranch(currentRoot, taskSnapshot.branchName);
             trace(`Push de ${taskSnapshot.branchName}`);
@@ -764,7 +839,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (!allReposClosed(active)) {
       const pending = pendingRepoLabels(active).join(", ");
       vscode.window.showInformationMessage(
-        `${activeRepo.label} listo. Falta cerrar: ${pending}. ` +
+        `${activeRepo.label}: ${activeRepo.status}. Falta cerrar: ${pending}. ` +
           `Abre esa ventana y usa "Trello: Terminar tarea".`
       );
       return;
@@ -783,7 +858,7 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    for (const repo of active.repos) {
+    for (const repo of active.repos.filter(r => r.status === "done")) {
       try {
         await checkoutBranch(repo.root, baseBranch);
         trace(`Checkout a ${baseBranch} en ${repo.root}`);
@@ -818,6 +893,8 @@ export function activate(context: vscode.ExtensionContext) {
     login,
     logout,
     selectList,
+    setCompanionRepo,
+    clearCompanionRepo,
     startTask,
     startSelectedTask,
     copyCardText,

@@ -1,7 +1,9 @@
 import * as vscode from "vscode";
 import { getStoredToken, TRELLO_APP_KEY } from "./auth";
 import { formatMetaLine, parseCardMeta } from "./cardMeta";
-import { getActiveTask } from "./taskState";
+import { getActiveTask, repoLabel } from "./taskState";
+import { getCompanionPath } from "./companionConfig";
+import { getRepoBranches } from "./github";
 
 function repoStatusIcon(status: string) {
   if (status === "done") {
@@ -188,6 +190,51 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
       account.description = "Trello";
       account.iconPath = new vscode.ThemeIcon("account");
 
+      const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      let companionNode: TrelloNode | undefined;
+      if (workspacePath) {
+        try {
+          const currentRoot = (await getRepoBranches(workspacePath)).root;
+          const companion = getCompanionPath(
+            this.context.globalState,
+            currentRoot
+          );
+          companionNode = new TrelloNode(
+            "Repo companion",
+            vscode.TreeItemCollapsibleState.Collapsed,
+            [
+              companion
+                ? infoNode(
+                    `${repoLabel(companion)}`,
+                    "link",
+                    companion
+                  )
+                : infoNode("Sin configurar", "warning"),
+              actionNode(
+                "Configurar companion",
+                "trelloBranch.setCompanionRepo",
+                "folder-opened"
+              ),
+              ...(companion
+                ? [
+                    actionNode(
+                      "Quitar companion",
+                      "trelloBranch.clearCompanionRepo",
+                      "close"
+                    ),
+                  ]
+                : []),
+            ]
+          );
+          companionNode.iconPath = new vscode.ThemeIcon("repo");
+          companionNode.description = companion
+            ? repoLabel(companion)
+            : "solo este repo";
+        } catch {
+          // Workspace abierto pero no es git.
+        }
+      }
+
       const active = getActiveTask(
         this.context.globalState,
         this.context.workspaceState
@@ -226,11 +273,23 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
           vscode.TreeItemCollapsibleState.Expanded,
           [
             ...cardInfoChildren(cardDesc),
-            infoNode(active.branchName, "git-branch", active.branchName),
-            ...repoNodes,
+            infoNode(
+              `Rama al terminar: ${active.branchName}`,
+              "git-branch",
+              `${active.branchName}\nSe crea al terminar, solo en los repos con cambios.`
+            ),
+            ...(active.repos.length
+              ? repoNodes
+              : [
+                  infoNode(
+                    "Repos: se detectan al terminar (este + companion)",
+                    "search",
+                    "Al terminar se listan los repos con cambios para confirmar."
+                  ),
+                ]),
             ...imageNodes(active.cardId, images),
             actionNode(
-              "Terminar en este repo",
+              "Terminar tarea",
               "trelloBranch.finishTask",
               "pass-filled"
             ),
@@ -254,6 +313,7 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
       if (!listId) {
         return [
           account,
+          ...(companionNode ? [companionNode] : []),
           activeNode,
           actionNode(
             "Seleccionar tablero y lista",
@@ -297,7 +357,7 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
       );
       tasksNode.iconPath = new vscode.ThemeIcon("checklist");
 
-      return [account, activeNode, listNode, tasksNode];
+      return [account, ...(companionNode ? [companionNode] : []), activeNode, listNode, tasksNode];
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const errorNode = actionNode(

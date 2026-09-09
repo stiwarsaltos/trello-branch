@@ -65,7 +65,7 @@ export function getActiveTask(
   workspaceState?: vscode.Memento
 ): ActiveTask | undefined {
   const current = globalState.get<ActiveTask>(ACTIVE_TASK_KEY);
-  if (current?.repos?.length) {
+  if (current?.cardId && Array.isArray(current.repos)) {
     return current;
   }
 

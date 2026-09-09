@@ -91,6 +91,28 @@ export async function createLocalBranch(
   await git.checkoutLocalBranch(branchName);
 }
 
+/**
+ * Crea la rama desde HEAD actual y deja los cambios locales (staged/unstaged).
+ * No hace checkout a develop: se usa al terminar, cuando el trabajo ya está hecho.
+ */
+export async function createBranchFromCurrent(
+  repoPath: string,
+  branchName: string
+) {
+  const git = simpleGit(repoPath);
+  const branches = await getRepoBranches(repoPath);
+
+  if (branches.current === branchName) {
+    return;
+  }
+
+  if (branchExists(branches, branchName)) {
+    throw new Error(`La rama "${branchName}" ya existe.`);
+  }
+
+  await git.checkoutLocalBranch(branchName);
+}
+
 export async function checkoutBranch(repoPath: string, branchName: string) {
   const git = simpleGit(repoPath);
   const branches = await getRepoBranches(repoPath);
@@ -136,13 +158,38 @@ export async function getChangeSummary(repoPath: string): Promise<ChangeSummary>
   };
 }
 
-export async function commitAllChanges(repoPath: string, message: string) {
+export function changeFileCount(summary: ChangeSummary) {
+  return new Set([
+    ...summary.staged,
+    ...summary.unstaged,
+    ...summary.untracked,
+  ]).size;
+}
+
+export async function stageAllChanges(repoPath: string) {
   const git = simpleGit(repoPath);
   await git.add(["-A"]);
-  const status = await git.status();
-  if (status.files.length === 0 && status.staged.length === 0) {
+  const files = (await git.diff(["--cached", "--name-only"]))
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean);
+  const added = (await git.diff(["--cached", "--name-only", "--diff-filter=A"]))
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean);
+  const deleted = (await git.diff(["--cached", "--name-only", "--diff-filter=D"]))
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean);
+  const diff = await git.diff(["--cached"]);
+  if (!files.length) {
     throw new Error("No hay cambios para hacer commit.");
   }
+  return { files, added, deleted, diff };
+}
+
+export async function commitStaged(repoPath: string, message: string) {
+  const git = simpleGit(repoPath);
   await git.commit(message);
 }
 
