@@ -134,6 +134,37 @@ export async function checkoutBranch(repoPath: string, branchName: string) {
   );
 }
 
+function baseRef(branches: RepoBranches, baseBranch: string) {
+  const remoteBase = `origin/${baseBranch}`;
+  if (branches.remotes.includes(remoteBase)) {
+    return remoteBase;
+  }
+  if (branches.locals.includes(baseBranch)) {
+    return baseBranch;
+  }
+  return undefined;
+}
+
+/** Archivos nuevos y diff de la rama actual respecto a la base (p. ej. develop). */
+export async function getChangesSinceBase(
+  repoPath: string,
+  baseBranch: string
+) {
+  const git = simpleGit(repoPath);
+  const branches = await getRepoBranches(repoPath);
+  const ref = baseRef(branches, baseBranch);
+  if (!ref) {
+    return { added: [] as string[], diff: "" };
+  }
+  const range = `${ref}...HEAD`;
+  const added = (await git.diff(["--name-only", "--diff-filter=A", range]))
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean);
+  const diff = await git.diff([range]);
+  return { added, diff };
+}
+
 export async function getChangeSummary(repoPath: string): Promise<ChangeSummary> {
   const git = simpleGit(repoPath);
   const status = await git.status();

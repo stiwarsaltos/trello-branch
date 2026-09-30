@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { getStoredToken, TRELLO_APP_KEY } from "./auth";
-import { formatMetaLine, parseCardMeta } from "./cardMeta";
+import { formatMetaLine, parseCardMeta, sanitizeForPr } from "./cardMeta";
 import { getActiveTask, repoLabel } from "./taskState";
 import { getCompanionPath } from "./companionConfig";
 import { getRepoBranches } from "./github";
@@ -72,14 +72,21 @@ function copyableTextNode(kind: string, text: string, icon: string) {
   return item;
 }
 
-function cardInfoChildren(desc: string) {
-  const meta = parseCardMeta(desc ?? "");
-  const descripcion = meta.descripcion ?? "Sin descripción";
-  const ejemplo = meta.ejemplo ?? "Sin ejemplo";
+function cardInfoChildren(desc: string, ruc?: string) {
+  const meta = parseCardMeta(desc ?? "", { ruc });
+  const descripcion =
+    sanitizeForPr(meta.descripcion ?? "", meta.empresa) || "Sin descripción";
+  const ejemplo = sanitizeForPr(meta.ejemplo ?? "", meta.empresa) || "Sin ejemplo";
   const metaLine = formatMetaLine(meta) ?? "Sin módulo/submódulo";
 
   return [
     infoNode(metaLine, "symbol-namespace", metaLine),
+    ...(meta.ruc
+      ? [copyableTextNode("RUC", meta.ruc, "key")]
+      : []),
+    ...(meta.empresa
+      ? [copyableTextNode("Empresa", meta.empresa, "organization")]
+      : []),
     copyableTextNode("Descripción", descripcion, "note"),
     copyableTextNode("Ejemplo", ejemplo, "lightbulb"),
   ];
@@ -116,9 +123,9 @@ function imageNodes(cardId: string, images: TrelloAttachment[]) {
 }
 
 function taskNode(card: TrelloCard) {
-  const meta = parseCardMeta(card.desc ?? "");
+  const meta = parseCardMeta(card.desc ?? "", { ruc: card.ruc });
   const children: TrelloNode[] = [
-    ...cardInfoChildren(card.desc ?? ""),
+    ...cardInfoChildren(card.desc ?? "", card.ruc),
     actionNode(
       "Empezar esta tarea",
       "trelloBranch.startSelectedTask",
@@ -242,6 +249,7 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
       let activeNode: TrelloNode;
       if (active) {
         let cardDesc = active.cardDesc ?? "";
+        let cardRuc = active.cardRuc;
         let images: TrelloAttachment[] = [];
         try {
           const [card, imageAttachments] = await Promise.all([
@@ -249,12 +257,13 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
             getCardImageAttachments(TRELLO_APP_KEY, token, active.cardId),
           ]);
           cardDesc = card.desc ?? cardDesc;
+          cardRuc = card.ruc ?? cardRuc;
           images = imageAttachments;
         } catch {
           // Usa la descripción guardada si la API falla.
         }
 
-        const meta = parseCardMeta(cardDesc);
+        const meta = parseCardMeta(cardDesc, { ruc: cardRuc });
         const repoNodes = active.repos.map(repo => {
           const label =
             repo.status === "done" && repo.prUrl
@@ -272,7 +281,7 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
           `En curso: ${active.cardName}`,
           vscode.TreeItemCollapsibleState.Expanded,
           [
-            ...cardInfoChildren(cardDesc),
+            ...cardInfoChildren(cardDesc, cardRuc),
             infoNode(
               `Rama al terminar: ${active.branchName}`,
               "git-branch",
@@ -292,6 +301,11 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
               "Terminar tarea",
               "trelloBranch.finishTask",
               "pass-filled"
+            ),
+            actionNode(
+              "Regresar tarea",
+              "trelloBranch.returnTask",
+              "discard"
             ),
           ]
         );

@@ -7,7 +7,7 @@ import {
   resolveDeveloperName,
   TRELLO_APP_KEY,
 } from "./auth";
-import { getAssignedCards, getBoards, getCard, getLists, moveCardToNextList } from "./trello";
+import { commentOnCard, getAssignedCards, getBoards, getCard, getList, getLists, moveCard, moveCardToNextList, moveCardToPreviousList } from "./trello";
 import {
   branchExists,
   changeFileCount,
@@ -36,11 +36,12 @@ import {
   updateActiveRepo,
 } from "./taskState";
 import { TrelloTreeProvider } from "./treeView";
-import { formatMetaLine, parseCardMeta } from "./cardMeta";
+import { descriptionForPr, formatMetaLine, parseCardMeta, sanitizeForPr } from "./cardMeta";
 import { buildCommitFromDiff } from "./commitMessage";
 import { runProjectCodeReview } from "./codeReview";
 import { previewCardImage } from "./imagePreview";
 import { resolveCodeReviewRunner } from "./projectManifest";
+import { buildFinishCardComment } from "./finishComment";
 import {
   clearCompanionPath,
   getCompanionPath,
@@ -301,22 +302,26 @@ async function resolveBaseBranch(configured: string, branches: RepoBranches) {
 
 function buildPrBody(active: ActiveTask) {
   const meta = parseCardMeta(active.cardDesc ?? "");
-  return [
-    `## Summary`,
-    `- ${active.cardName}`,
-    meta.modulo && meta.submodulo
-      ? `- Module: ${meta.modulo} → ${meta.submodulo}`
-      : undefined,
-    "",
-    meta.descripcion ? `## Description\n\n${meta.descripcion}` : undefined,
-    meta.ejemplo ? `## Example\n\n${meta.ejemplo}` : undefined,
-    "",
-    "## Test plan",
-    "- [ ] Review the PR diff",
-    "- [ ] Test the affected flow",
-  ]
-    .filter(line => line !== undefined)
-    .join("\n");
+  const descripcion = descriptionForPr(active.cardDesc ?? "");
+  const modulo = sanitizeForPr(meta.modulo ?? "", meta.empresa);
+  const submodulo = sanitizeForPr(meta.submodulo ?? "", meta.empresa);
+  const cardName = sanitizeForPr(active.cardName, meta.empresa) || active.cardName;
+  return sanitizeForPr(
+    [
+      `## Summary`,
+      `- ${cardName}`,
+      modulo && submodulo ? `- Module: ${modulo} → ${submodulo}` : undefined,
+      "",
+      descripcion ? `## Description\n\n${descripcion}` : undefined,
+      "",
+      "## Test plan",
+      "- [ ] Review the PR diff",
+      "- [ ] Test the affected flow",
+    ]
+      .filter(line => line !== undefined)
+      .join("\n"),
+    meta.empresa
+  );
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -480,10 +485,12 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     const taskItems = cards.map(c => {
-      const meta = parseCardMeta(c.desc ?? "");
+      const meta = parseCardMeta(c.desc ?? "", { ruc: c.ruc });
+      const descripcion = sanitizeForPr(meta.descripcion ?? "", meta.empresa);
+      const ejemplo = sanitizeForPr(meta.ejemplo ?? "", meta.empresa);
       const detailParts = [
-        meta.descripcion ? `Desc: ${meta.descripcion.replace(/\s+/g, " ").slice(0, 140)}` : undefined,
-        meta.ejemplo ? `Ej: ${meta.ejemplo.replace(/\s+/g, " ").slice(0, 100)}` : undefined,
+        descripcion ? `Desc: ${descripcion.replace(/\s+/g, " ").slice(0, 140)}` : undefined,
+        ejemplo ? `Ej: ${ejemplo.replace(/\s+/g, " ").slice(0, 100)}` : undefined,
         !meta.modulo || !meta.submodulo ? "Sin Modulo/Submodulo" : undefined,
       ].filter(Boolean);
       return {
@@ -492,6 +499,7 @@ export function activate(context: vscode.ExtensionContext) {
         detail: detailParts.join(" · ") || undefined,
         id: c.id,
         desc: c.desc,
+        ruc: c.ruc,
       };
     });
     const picked = selectedCardId
@@ -540,6 +548,8 @@ export function activate(context: vscode.ExtensionContext) {
         cardName: picked.label,
         cardDesc: picked.desc ?? "",
         branchName: defaultBranchName,
+        originListId: listId,
+        cardRuc: picked.ruc,
         repos: [],
         startedAt: new Date().toISOString(),
       });
@@ -845,6 +855,13 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
+    let finishComment: string | undefined;
+    try {
+      finishComment = await buildFinishCardComment(active.repos, baseBranch);
+    } catch (error) {
+      trace(`No se pudo armar el comentario de Trello: ${errorMessage(error)}`);
+    }
+
     let movedTo: string | undefined;
     try {
       const card = await getCard(TRELLO_APP_KEY, token, active.cardId);
@@ -856,6 +873,20 @@ export function activate(context: vscode.ExtensionContext) {
     } catch (error) {
       reportError("No se pudo mover la tarjeta", error);
       return;
+    }
+
+    if (finishComment) {
+      try {
+        await commentOnCard(
+          TRELLO_APP_KEY,
+          token,
+          active.cardId,
+          finishComment
+        );
+        trace(`Comentario en tarjeta: ${finishComment.replace(/\n/g, " | ")}`);
+      } catch (error) {
+        reportError("No se pudo comentar la tarjeta", error);
+      }
     }
 
     for (const repo of active.repos.filter(r => r.status === "done")) {
@@ -883,6 +914,76 @@ export function activate(context: vscode.ExtensionContext) {
     );
   });
 
+  const returnTask = vscode.commands.registerCommand(
+    "trelloBranch.returnTask",
+    async () => {
+      trace("Comando: Regresar tarea");
+      const session = await requireSession(secrets);
+      if (!session) {
+        return;
+      }
+
+      const active = getActiveTask(globalState, workspaceState);
+      if (!active) {
+        vscode.window.showInformationMessage("No hay una tarea activa para regresar.");
+        return;
+      }
+
+      const donePrs = active.repos.filter(r => r.prUrl);
+      const warning = donePrs.length
+        ? ` Hay ${donePrs.length} PR(s) ya creados; no se cierran.`
+        : "";
+      const confirm = await vscode.window.showWarningMessage(
+        `¿Regresar "${active.cardName}" a la lista de origen?` + warning,
+        "Regresar",
+        "Cancelar"
+      );
+      if (confirm !== "Regresar") {
+        return;
+      }
+
+      try {
+        const card = await getCard(TRELLO_APP_KEY, session.token, active.cardId);
+        let movedTo: string;
+        if (active.originListId && active.originListId !== card.idList) {
+          await moveCard(
+            TRELLO_APP_KEY,
+            session.token,
+            active.cardId,
+            active.originListId
+          );
+          try {
+            movedTo = (await getList(
+              TRELLO_APP_KEY,
+              session.token,
+              active.originListId
+            )).name;
+          } catch {
+            movedTo = "lista de origen";
+          }
+          trace(`Tarjeta devuelta a ${movedTo} (${active.originListId})`);
+        } else {
+          const moved = await moveCardToPreviousList(
+            TRELLO_APP_KEY,
+            session.token,
+            active.cardId,
+            card.idList
+          );
+          movedTo = moved.to.name;
+          trace(`Tarjeta movida: ${moved.from.name} → ${moved.to.name}`);
+        }
+
+        await clearActiveTask(globalState, workspaceState);
+        treeProvider.refresh();
+        vscode.window.showInformationMessage(
+          `Tarea regresada a "${movedTo}". Ya no está activa.`
+        );
+      } catch (error) {
+        reportError("No se pudo regresar la tarjeta", error);
+      }
+    }
+  );
+
   const showLog = vscode.commands.registerCommand("trelloBranch.showLog", () => log.show());
   const refreshView = vscode.commands.registerCommand(
     "trelloBranch.refreshView",
@@ -900,6 +1001,7 @@ export function activate(context: vscode.ExtensionContext) {
     copyCardText,
     previewImage,
     finishTask,
+    returnTask,
     showLog,
     refreshView,
     treeView,

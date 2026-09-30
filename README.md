@@ -16,11 +16,12 @@ Extensión para Cursor/VS Code que conecta tarjetas de Trello con ramas Git: emp
 | Acción | Resultado |
 |--------|-----------|
 | Empezar tarea | Marca la tarjeta activa y la mueve; no elige repos ni crea ramas |
+| Regresar tarea | Devuelve la tarjeta a la lista de origen y limpia la tarea activa |
 | Rama ya existe | Al terminar, pide un nombre alternativo |
-| Terminar tarea | Detecta cambios, confirmas repos → rama + code review + commit Conventional Commits + PR |
+| Terminar tarea | Detecta cambios → rama + code review + PR. Al pasar la tarjeta: comentario Pull en front/back y Comando si hay uno nuevo |
 | Vista lateral | Cuenta, tarea activa (detalle + imágenes), lista y tareas asignadas |
 
-La descripción de la tarjeta debe incluir `Modulo:` y `Submodulo:` (también usa `Descripción:` / `Ejemplo:`).
+El RUC se lee del campo **RUC EMPRESA** en Amazing Fields (Power-Up), descomprimiendo el `pluginData` de Trello. No va en el PR.
 
 ## Requisitos
 
@@ -55,4 +56,4 @@ Instala el `.vsix` generado con **Extensions: Install from VSIX…**.
 - Las imágenes de la tarea activa se pueden previsualizar desde el árbol.
 - Si el code review falla (exit ≠ 0), no se hace commit/push/PR.
 - El **commit** describe **los cambios del diff** (funciones/archivos añadidos o quitados), en Conventional Commits en inglés. El título de Trello no entra en el commit; sí va en el PR.
-- El **PR** usa el nombre de la tarjeta como título.
+- El **PR** usa el nombre de la tarjeta como título. La descripción del PR no incluye imágenes, Ejemplo, RUC ni datos de empresa.

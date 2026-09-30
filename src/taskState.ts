@@ -15,6 +15,8 @@ export type ActiveTask = {
   cardName: string;
   cardDesc: string;
   branchName: string;
+  originListId?: string;
+  cardRuc?: string;
   repos: ActiveRepo[];
   startedAt: string;
 };
