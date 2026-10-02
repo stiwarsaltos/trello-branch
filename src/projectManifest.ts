@@ -45,6 +45,25 @@ export async function resolveCodeReviewRunner(
   return undefined;
 }
 
+/** Front = package.json con code-review; back = composer.json. */
+export async function resolveRepoSide(
+  repoPath: string
+): Promise<"front" | "back"> {
+  const runner = await resolveCodeReviewRunner(repoPath);
+  if (runner?.kind === "php") {
+    return "back";
+  }
+  if (runner?.kind === "node") {
+    return "front";
+  }
+  try {
+    await fs.access(path.join(repoPath, "composer.json"));
+    return "back";
+  } catch {
+    return "front";
+  }
+}
+
 async function hasScript(filePath: string, scriptName: string) {
   try {
     const raw = await fs.readFile(filePath, "utf8");

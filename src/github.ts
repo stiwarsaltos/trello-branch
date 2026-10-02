@@ -91,6 +91,48 @@ export async function createLocalBranch(
   await git.checkoutLocalBranch(branchName);
 }
 
+/** True si hay un PR abierto con esa rama como head. */
+export async function hasOpenPullRequest(repoPath: string, headBranch: string) {
+  try {
+    const { stdout } = await execFileAsync(
+      "gh",
+      ["pr", "list", "--head", headBranch, "--state", "open", "--json", "number"],
+      { cwd: repoPath }
+    );
+    const prs = JSON.parse(stdout.trim() || "[]") as unknown[];
+    return Array.isArray(prs) && prs.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Deja el repo en la rama de la tarea: la ocupa si ya existe, o la crea desde HEAD.
+ * Conserva cambios locales (staged/unstaged).
+ */
+export async function ensureTaskBranch(repoPath: string, branchName: string) {
+  const git = simpleGit(repoPath);
+  const branches = await getRepoBranches(repoPath);
+
+  if (branches.current === branchName) {
+    return "current";
+  }
+
+  if (branches.locals.includes(branchName)) {
+    await git.checkout(branchName);
+    return "checkout";
+  }
+
+  const remote = `origin/${branchName}`;
+  if (branches.remotes.includes(remote)) {
+    await git.checkout(["-b", branchName, "--track", remote]);
+    return "track";
+  }
+
+  await git.checkoutLocalBranch(branchName);
+  return "created";
+}
+
 export async function checkoutBranch(repoPath: string, branchName: string) {
   const git = simpleGit(repoPath);
   const branches = await getRepoBranches(repoPath);
@@ -110,6 +152,37 @@ export async function checkoutBranch(repoPath: string, branchName: string) {
     `No se pudo volver a "${branchName}" en ${branches.root}. ` +
     `Ramas locales: ${branches.locals.join(", ") || "(ninguna)"}.`
   );
+}
+
+function baseRef(branches: RepoBranches, baseBranch: string) {
+  const remoteBase = `origin/${baseBranch}`;
+  if (branches.remotes.includes(remoteBase)) {
+    return remoteBase;
+  }
+  if (branches.locals.includes(baseBranch)) {
+    return baseBranch;
+  }
+  return undefined;
+}
+
+/** Archivos nuevos y diff de la rama actual respecto a la base (p. ej. develop). */
+export async function getChangesSinceBase(
+  repoPath: string,
+  baseBranch: string
+) {
+  const git = simpleGit(repoPath);
+  const branches = await getRepoBranches(repoPath);
+  const ref = baseRef(branches, baseBranch);
+  if (!ref) {
+    return { added: [] as string[], diff: "" };
+  }
+  const range = `${ref}...HEAD`;
+  const added = (await git.diff(["--name-only", "--diff-filter=A", range]))
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean);
+  const diff = await git.diff([range]);
+  return { added, diff };
 }
 
 export async function getChangeSummary(repoPath: string): Promise<ChangeSummary> {
@@ -136,13 +209,38 @@ export async function getChangeSummary(repoPath: string): Promise<ChangeSummary>
   };
 }
 
-export async function commitAllChanges(repoPath: string, message: string) {
+export function changeFileCount(summary: ChangeSummary) {
+  return new Set([
+    ...summary.staged,
+    ...summary.unstaged,
+    ...summary.untracked,
+  ]).size;
+}
+
+export async function stageAllChanges(repoPath: string) {
   const git = simpleGit(repoPath);
   await git.add(["-A"]);
-  const status = await git.status();
-  if (status.files.length === 0 && status.staged.length === 0) {
+  const files = (await git.diff(["--cached", "--name-only"]))
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean);
+  const added = (await git.diff(["--cached", "--name-only", "--diff-filter=A"]))
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean);
+  const deleted = (await git.diff(["--cached", "--name-only", "--diff-filter=D"]))
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean);
+  const diff = await git.diff(["--cached"]);
+  if (!files.length) {
     throw new Error("No hay cambios para hacer commit.");
   }
+  return { files, added, deleted, diff };
+}
+
+export async function commitStaged(repoPath: string, message: string) {
+  const git = simpleGit(repoPath);
   await git.commit(message);
 }
 

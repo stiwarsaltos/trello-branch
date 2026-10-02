@@ -1,7 +1,9 @@
 import * as vscode from "vscode";
 import { getStoredToken, TRELLO_APP_KEY } from "./auth";
-import { formatMetaLine, parseCardMeta } from "./cardMeta";
-import { getActiveTask } from "./taskState";
+import { formatMetaLine, identificationLabel, parseCardMeta, sanitizeForPr } from "./cardMeta";
+import { getActiveTask, repoLabel } from "./taskState";
+import { getCompanionPath } from "./companionConfig";
+import { getRepoBranches } from "./github";
 
 function repoStatusIcon(status: string) {
   if (status === "done") {
@@ -13,14 +15,18 @@ function repoStatusIcon(status: string) {
   return "circle-outline";
 }
 import {
-  getAssignedCards,
+  getAssignedCardsForBoard,
+  getBoards,
   getCard,
   getCardImageAttachments,
-  getList,
   getMe,
   TrelloAttachment,
   TrelloCard,
 } from "./trello";
+import {
+  CatalogBoard,
+  syncBoardCatalog,
+} from "./boardConfig";
 
 class TrelloNode extends vscode.TreeItem {
   constructor(
@@ -72,12 +78,20 @@ function copyableTextNode(kind: string, text: string, icon: string) {
 
 function cardInfoChildren(desc: string) {
   const meta = parseCardMeta(desc ?? "");
-  const descripcion = meta.descripcion ?? "Sin descripción";
-  const ejemplo = meta.ejemplo ?? "Sin ejemplo";
+  const descripcion =
+    sanitizeForPr(meta.descripcion ?? "", meta.empresa) || "Sin descripción";
+  const ejemplo = sanitizeForPr(meta.ejemplo ?? "", meta.empresa) || "Sin ejemplo";
   const metaLine = formatMetaLine(meta) ?? "Sin módulo/submódulo";
+  const idLabel = meta.ruc ? identificationLabel(meta.ruc) : "RUC";
 
   return [
     infoNode(metaLine, "symbol-namespace", metaLine),
+    ...(meta.empresa
+      ? [copyableTextNode("Empresa", meta.empresa, "organization")]
+      : []),
+    ...(meta.ruc
+      ? [copyableTextNode(idLabel, meta.ruc, "key")]
+      : []),
     copyableTextNode("Descripción", descripcion, "note"),
     copyableTextNode("Ejemplo", ejemplo, "lightbulb"),
   ];
@@ -121,7 +135,7 @@ function taskNode(card: TrelloCard) {
       "Empezar esta tarea",
       "trelloBranch.startSelectedTask",
       "play",
-      card.id
+      { cardId: card.id, listId: card.idList }
     ),
   ];
 
@@ -149,6 +163,90 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
 
   getTreeItem(element: TrelloNode) {
     return element;
+  }
+
+  private async boardNode(
+    token: string,
+    memberId: string,
+    board: CatalogBoard
+  ) {
+    if (!board.id) {
+      const node = new TrelloNode(
+        board.name,
+        vscode.TreeItemCollapsibleState.Collapsed,
+        [
+          actionNode(
+            "Vincular tablero de Trello",
+            "trelloBranch.linkBoard",
+            "link",
+            board.key
+          ),
+        ]
+      );
+      node.description = board.builtin ? "por defecto · sin vincular" : "sin vincular";
+      node.iconPath = new vscode.ThemeIcon("warning");
+      return node;
+    }
+
+    try {
+      const { originList, cards } = await getAssignedCardsForBoard(
+        TRELLO_APP_KEY,
+        token,
+        board.id,
+        memberId
+      );
+      const children: TrelloNode[] = [
+        ...(originList
+          ? [infoNode(`Lista de origen: ${originList.name}`, "list-unordered")]
+          : [infoNode("El tablero no tiene listas", "warning")]),
+        ...(cards.length
+          ? cards.map(taskNode)
+          : [
+              actionNode(
+                "No hay tareas asignadas — actualizar",
+                "trelloBranch.refreshView",
+                "refresh"
+              ),
+            ]),
+        ...(board.builtin
+          ? []
+          : [
+              actionNode(
+                "Quitar tablero",
+                "trelloBranch.removeBoard",
+                "close",
+                board.key
+              ),
+            ]),
+      ];
+      const node = new TrelloNode(
+        board.name,
+        vscode.TreeItemCollapsibleState.Expanded,
+        children
+      );
+      node.description = `${cards.length} tarea(s)`;
+      node.iconPath = new vscode.ThemeIcon(
+        board.builtin ? "bookmark" : "layout"
+      );
+      return node;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const node = new TrelloNode(
+        board.name,
+        vscode.TreeItemCollapsibleState.Collapsed,
+        [
+          actionNode(
+            "No se pudo cargar — reintentar",
+            "trelloBranch.refreshView",
+            "error"
+          ),
+        ]
+      );
+      node.description = "error";
+      node.tooltip = message;
+      node.iconPath = new vscode.ThemeIcon("error");
+      return node;
+    }
   }
 
   async getChildren(element?: TrelloNode): Promise<TrelloNode[]> {
@@ -188,6 +286,51 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
       account.description = "Trello";
       account.iconPath = new vscode.ThemeIcon("account");
 
+      const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      let companionNode: TrelloNode | undefined;
+      if (workspacePath) {
+        try {
+          const currentRoot = (await getRepoBranches(workspacePath)).root;
+          const companion = getCompanionPath(
+            this.context.globalState,
+            currentRoot
+          );
+          companionNode = new TrelloNode(
+            "Repo companion",
+            vscode.TreeItemCollapsibleState.Collapsed,
+            [
+              companion
+                ? infoNode(
+                    `${repoLabel(companion)}`,
+                    "link",
+                    companion
+                  )
+                : infoNode("Sin configurar", "warning"),
+              actionNode(
+                "Configurar companion",
+                "trelloBranch.setCompanionRepo",
+                "folder-opened"
+              ),
+              ...(companion
+                ? [
+                    actionNode(
+                      "Quitar companion",
+                      "trelloBranch.clearCompanionRepo",
+                      "close"
+                    ),
+                  ]
+                : []),
+            ]
+          );
+          companionNode.iconPath = new vscode.ThemeIcon("repo");
+          companionNode.description = companion
+            ? repoLabel(companion)
+            : "solo este repo";
+        } catch {
+          // Workspace abierto pero no es git.
+        }
+      }
+
       const active = getActiveTask(
         this.context.globalState,
         this.context.workspaceState
@@ -226,13 +369,30 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
           vscode.TreeItemCollapsibleState.Expanded,
           [
             ...cardInfoChildren(cardDesc),
-            infoNode(active.branchName, "git-branch", active.branchName),
-            ...repoNodes,
+            infoNode(
+              `Rama al terminar: ${active.branchName}`,
+              "git-branch",
+              `${active.branchName}\nSe crea al terminar, solo en los repos con cambios.`
+            ),
+            ...(active.repos.length
+              ? repoNodes
+              : [
+                  infoNode(
+                    "Repos: se detectan al terminar (este + companion)",
+                    "search",
+                    "Al terminar se listan los repos con cambios para confirmar."
+                  ),
+                ]),
             ...imageNodes(active.cardId, images),
             actionNode(
-              "Terminar en este repo",
+              "Terminar tarea",
               "trelloBranch.finishTask",
               "pass-filled"
+            ),
+            actionNode(
+              "Regresar tarea",
+              "trelloBranch.returnTask",
+              "discard"
             ),
           ]
         );
@@ -248,56 +408,28 @@ export class TrelloTreeProvider implements vscode.TreeDataProvider<TrelloNode> {
         active ? "play-circle" : "circle-outline"
       );
 
-      const listId = vscode.workspace
-        .getConfiguration("trelloBranch")
-        .get<string>("listId");
-      if (!listId) {
-        return [
-          account,
-          activeNode,
-          actionNode(
-            "Seleccionar tablero y lista",
-            "trelloBranch.selectList",
-            "list-selection"
-          ),
-        ];
-      }
+      const trelloBoards = await getBoards(TRELLO_APP_KEY, token);
+      const catalog = await syncBoardCatalog(this.context.globalState, trelloBoards);
+      const boardNodes = await Promise.all(
+        catalog.map(board => this.boardNode(token, member.id, board))
+      );
 
-      const [list, cards] = await Promise.all([
-        getList(TRELLO_APP_KEY, token, listId),
-        getAssignedCards(TRELLO_APP_KEY, token, listId, member.id),
-      ]);
-
-      const listNode = new TrelloNode(
-        list.name,
-        vscode.TreeItemCollapsibleState.Collapsed,
+      const boardsRoot = new TrelloNode(
+        "Tableros",
+        vscode.TreeItemCollapsibleState.Expanded,
         [
+          ...boardNodes,
           actionNode(
-            "Cambiar lista",
-            "trelloBranch.selectList",
-            "list-selection"
+            "Agregar tablero",
+            "trelloBranch.addBoard",
+            "plus"
           ),
         ]
       );
-      listNode.description = "Lista de origen";
-      listNode.iconPath = new vscode.ThemeIcon("list-unordered");
+      boardsRoot.iconPath = new vscode.ThemeIcon("layout");
+      boardsRoot.description = `${catalog.length}`;
 
-      const tasksNode = new TrelloNode(
-        `Mis tareas (${cards.length})`,
-        vscode.TreeItemCollapsibleState.Expanded,
-        cards.length
-          ? cards.map(taskNode)
-          : [
-              actionNode(
-                "No hay tareas asignadas — actualizar",
-                "trelloBranch.refreshView",
-                "refresh"
-              ),
-            ]
-      );
-      tasksNode.iconPath = new vscode.ThemeIcon("checklist");
-
-      return [account, activeNode, listNode, tasksNode];
+      return [account, ...(companionNode ? [companionNode] : []), activeNode, boardsRoot];
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const errorNode = actionNode(
