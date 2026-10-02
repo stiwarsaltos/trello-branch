@@ -1,6 +1,6 @@
 import axios from "axios";
-import { rucFromAmazingPluginData } from "./amazingFields";
-import { isRucEmpresaFieldName, normalizeRuc } from "./cardMeta";
+import { companyFromAmazingPluginData } from "./amazingFields";
+import { isEmpresaFieldName, isRucEmpresaFieldName, splitCompanyAndId } from "./cardMeta";
 
 export type TrelloMember = {
   id: string;
@@ -34,9 +34,11 @@ export type TrelloCard = {
   name: string;
   desc: string;
   idMembers: string[];
+  idList?: string;
   customFieldItems?: TrelloCustomFieldItem[];
   pluginData?: TrelloPluginData[];
   ruc?: string;
+  empresa?: string;
 };
 
 export type TrelloBoard = {
@@ -87,7 +89,7 @@ export async function getCards(apiKey: string, token: string, listId: string) {
     params: {
       key: apiKey,
       token,
-      fields: "name,desc,idMembers",
+      fields: "name,desc,idMembers,idList",
       customFieldItems: true,
       pluginData: true,
     }
@@ -114,9 +116,11 @@ export async function getCard(
     getBoardCustomFields(apiKey, token, card.idBoard),
     getBoardPluginData(apiKey, token, card.idBoard),
   ]);
+  const company = resolveCardCompany(card, fields, boardPluginData);
   return {
     ...card,
-    ruc: resolveCardRuc(card, fields, boardPluginData),
+    ruc: company.ruc,
+    empresa: company.empresa,
   };
 }
 
@@ -156,25 +160,45 @@ function customFieldValue(item: TrelloCustomFieldItem) {
   return item.value?.text ?? item.value?.number;
 }
 
-function rucFromCustomFields(
+function companyFromCustomFields(
   fields: TrelloCustomField[],
   items: TrelloCustomFieldItem[] | undefined
 ) {
+  const info: { ruc?: string; empresa?: string } = {};
   if (!items?.length || !fields.length) {
-    return undefined;
+    return info;
   }
   const byId = new Map(fields.map(field => [field.id, field]));
   for (const item of items) {
     const field = byId.get(item.idCustomField);
-    if (!field || !isRucEmpresaFieldName(field.name)) {
+    if (!field) {
       continue;
     }
-    const ruc = normalizeRuc(customFieldValue(item));
-    if (ruc) {
-      return ruc;
+    if (!isRucEmpresaFieldName(field.name) && !isEmpresaFieldName(field.name)) {
+      continue;
+    }
+    const split = splitCompanyAndId(customFieldValue(item));
+    if (split.identificacion && !info.ruc) {
+      info.ruc = split.identificacion;
+    }
+    if (split.empresa && !info.empresa) {
+      info.empresa = split.empresa;
     }
   }
-  return undefined;
+  return info;
+}
+
+export function resolveCardCompany(
+  card: Pick<TrelloCard, "customFieldItems" | "pluginData">,
+  fields: TrelloCustomField[],
+  boardPluginData?: TrelloPluginData[]
+) {
+  const native = companyFromCustomFields(fields, card.customFieldItems);
+  const amazing = companyFromAmazingPluginData(card.pluginData, boardPluginData);
+  return {
+    ruc: native.ruc ?? amazing.ruc,
+    empresa: native.empresa ?? amazing.empresa,
+  };
 }
 
 export function resolveCardRuc(
@@ -182,10 +206,7 @@ export function resolveCardRuc(
   fields: TrelloCustomField[],
   boardPluginData?: TrelloPluginData[]
 ) {
-  return (
-    rucFromCustomFields(fields, card.customFieldItems) ??
-    rucFromAmazingPluginData(card.pluginData, boardPluginData)
-  );
+  return resolveCardCompany(card, fields, boardPluginData).ruc;
 }
 
 export async function getCardAttachments(
@@ -250,7 +271,22 @@ function isImageAttachment(attachment: TrelloAttachment) {
   return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(attachment.name ?? "");
 }
 
-/** Tarjetas de la lista asignadas al miembro autenticado. */
+/** Tarjetas de la primera lista del tablero asignadas al miembro autenticado. */
+export async function getAssignedCardsForBoard(
+  apiKey: string,
+  token: string,
+  boardId: string,
+  memberId: string
+) {
+  const lists = await getLists(apiKey, token, boardId);
+  const origin = lists[0];
+  if (!origin) {
+    return { originList: undefined, cards: [] };
+  }
+  const cards = await getAssignedCards(apiKey, token, origin.id, memberId);
+  return { originList: origin, cards };
+}
+
 export async function getAssignedCards(
   apiKey: string,
   token: string,
@@ -265,10 +301,14 @@ export async function getAssignedCards(
   ]);
   return cards
     .filter(c => (c.idMembers ?? []).includes(memberId))
-    .map(card => ({
-      ...card,
-      ruc: resolveCardRuc(card, fields, boardPluginData),
-    }));
+    .map(card => {
+      const company = resolveCardCompany(card, fields, boardPluginData);
+      return {
+        ...card,
+        ruc: company.ruc,
+        empresa: company.empresa,
+      };
+    });
 }
 
 export async function getList(apiKey: string, token: string, listId: string) {

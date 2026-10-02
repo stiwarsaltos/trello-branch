@@ -91,26 +91,46 @@ export async function createLocalBranch(
   await git.checkoutLocalBranch(branchName);
 }
 
+/** True si hay un PR abierto con esa rama como head. */
+export async function hasOpenPullRequest(repoPath: string, headBranch: string) {
+  try {
+    const { stdout } = await execFileAsync(
+      "gh",
+      ["pr", "list", "--head", headBranch, "--state", "open", "--json", "number"],
+      { cwd: repoPath }
+    );
+    const prs = JSON.parse(stdout.trim() || "[]") as unknown[];
+    return Array.isArray(prs) && prs.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Crea la rama desde HEAD actual y deja los cambios locales (staged/unstaged).
- * No hace checkout a develop: se usa al terminar, cuando el trabajo ya está hecho.
+ * Deja el repo en la rama de la tarea: la ocupa si ya existe, o la crea desde HEAD.
+ * Conserva cambios locales (staged/unstaged).
  */
-export async function createBranchFromCurrent(
-  repoPath: string,
-  branchName: string
-) {
+export async function ensureTaskBranch(repoPath: string, branchName: string) {
   const git = simpleGit(repoPath);
   const branches = await getRepoBranches(repoPath);
 
   if (branches.current === branchName) {
-    return;
+    return "current";
   }
 
-  if (branchExists(branches, branchName)) {
-    throw new Error(`La rama "${branchName}" ya existe.`);
+  if (branches.locals.includes(branchName)) {
+    await git.checkout(branchName);
+    return "checkout";
+  }
+
+  const remote = `origin/${branchName}`;
+  if (branches.remotes.includes(remote)) {
+    await git.checkout(["-b", branchName, "--track", remote]);
+    return "track";
   }
 
   await git.checkoutLocalBranch(branchName);
+  return "created";
 }
 
 export async function checkoutBranch(repoPath: string, branchName: string) {

@@ -4,7 +4,11 @@ import {
   decompressFromEncodedURIComponent,
   decompressFromUTF16,
 } from "lz-string";
-import { isRucEmpresaFieldName, normalizeRuc } from "./cardMeta";
+import {
+  isEmpresaFieldName,
+  isRucEmpresaFieldName,
+  splitCompanyAndId,
+} from "./cardMeta";
 
 type PluginData = {
   idPlugin?: string;
@@ -94,64 +98,78 @@ function collectFieldDefs(data: unknown, acc: Map<string, string>) {
   }
 }
 
-function rucFromNamedMap(data: unknown, namesById: Map<string, string>): string | undefined {
-  if (!data) {
+function rawValueOf(value: unknown): string | undefined {
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value);
+  }
+  if (!value || typeof value !== "object") {
     return undefined;
+  }
+  const inner = value as Record<string, unknown>;
+  const raw = inner.value ?? inner.v ?? inner.text ?? inner.val ?? inner.number;
+  if (typeof raw === "string" || typeof raw === "number") {
+    return String(raw);
+  }
+  return undefined;
+}
+
+type CompanyInfo = { ruc?: string; empresa?: string };
+
+function mergeCompany(target: CompanyInfo, piece: CompanyInfo) {
+  if (piece.ruc && !target.ruc) {
+    target.ruc = piece.ruc;
+  }
+  if (piece.empresa && !target.empresa) {
+    target.empresa = piece.empresa;
+  }
+}
+
+function infoFromFieldName(name: string | undefined, raw: string | undefined): CompanyInfo {
+  if (!name || !raw) {
+    return {};
+  }
+  const split = splitCompanyAndId(raw);
+  if (isRucEmpresaFieldName(name) || isEmpresaFieldName(name)) {
+    return split;
+  }
+  return {};
+}
+
+function companyFromNamedMap(
+  data: unknown,
+  namesById: Map<string, string>,
+  acc: CompanyInfo = {}
+): CompanyInfo {
+  if (!data || (acc.ruc && acc.empresa)) {
+    return acc;
   }
   if (Array.isArray(data)) {
     for (const item of data) {
-      const found = rucFromNamedMap(item, namesById);
-      if (found) {
-        return found;
-      }
+      companyFromNamedMap(item, namesById, acc);
     }
-    return undefined;
-  }
-  if (typeof data === "string" || typeof data === "number") {
-    return undefined;
+    return acc;
   }
   if (typeof data !== "object") {
-    return undefined;
+    return acc;
   }
 
   const record = data as Record<string, unknown>;
   const named = fieldNameOf(record);
-  if (named && isRucEmpresaFieldName(named)) {
-    const raw = record.value ?? record.v ?? record.text ?? record.val ?? record.number;
-    if (typeof raw === "string" || typeof raw === "number") {
-      const ruc = normalizeRuc(String(raw));
-      if (ruc) {
-        return ruc;
-      }
-    }
-  }
+  mergeCompany(
+    acc,
+    infoFromFieldName(
+      named,
+      rawValueOf(record.value ?? record.v ?? record.text ?? record.val ?? record.number)
+    )
+  );
 
   for (const [key, value] of Object.entries(record)) {
     const mappedName = namesById.get(key) ?? key;
-    if (isRucEmpresaFieldName(mappedName) || isRucEmpresaFieldName(key)) {
-      if (typeof value === "string" || typeof value === "number") {
-        const ruc = normalizeRuc(String(value));
-        if (ruc) {
-          return ruc;
-        }
-      }
-      if (value && typeof value === "object") {
-        const inner = value as Record<string, unknown>;
-        const raw = inner.value ?? inner.v ?? inner.text ?? inner.val;
-        if (typeof raw === "string" || typeof raw === "number") {
-          const ruc = normalizeRuc(String(raw));
-          if (ruc) {
-            return ruc;
-          }
-        }
-      }
-    }
-    const nested = rucFromNamedMap(value, namesById);
-    if (nested) {
-      return nested;
-    }
+    mergeCompany(acc, infoFromFieldName(mappedName, rawValueOf(value)));
+    mergeCompany(acc, infoFromFieldName(key, rawValueOf(value)));
+    companyFromNamedMap(value, namesById, acc);
   }
-  return undefined;
+  return acc;
 }
 
 function amazingEntries(data: PluginData[] | undefined) {
@@ -160,7 +178,7 @@ function amazingEntries(data: PluginData[] | undefined) {
   return amazing.length ? amazing : all;
 }
 
-export function rucFromAmazingPluginData(
+export function companyFromAmazingPluginData(
   cardPluginData: PluginData[] | undefined,
   boardPluginData: PluginData[] | undefined
 ) {
@@ -174,15 +192,23 @@ export function rucFromAmazingPluginData(
     collectFieldDefs(decodeAmazingPluginValue(entry.value), namesById);
   }
 
+  const acc: CompanyInfo = {};
   const payloads = [
     ...cardEntries.map(entry => decodeAmazingPluginValue(entry.value)),
     ...boardEntries.map(entry => decodeAmazingPluginValue(entry.value)),
   ];
   for (const payload of payloads) {
-    const ruc = rucFromNamedMap(payload, namesById);
-    if (ruc) {
-      return ruc;
+    companyFromNamedMap(payload, namesById, acc);
+    if (acc.ruc && acc.empresa) {
+      break;
     }
   }
-  return undefined;
+  return acc;
+}
+
+export function rucFromAmazingPluginData(
+  cardPluginData: PluginData[] | undefined,
+  boardPluginData: PluginData[] | undefined
+) {
+  return companyFromAmazingPluginData(cardPluginData, boardPluginData).ruc;
 }

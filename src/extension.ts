@@ -7,17 +7,18 @@ import {
   resolveDeveloperName,
   TRELLO_APP_KEY,
 } from "./auth";
-import { commentOnCard, getAssignedCards, getBoards, getCard, getList, getLists, moveCard, moveCardToNextList, moveCardToPreviousList } from "./trello";
+import { commentOnCard, getAssignedCardsForBoard, getBoards, getCard, getList, moveCard, moveCardToNextList, moveCardToPreviousList } from "./trello";
 import {
   branchExists,
   changeFileCount,
   checkoutBranch,
   commitStaged,
-  createBranchFromCurrent,
   createPullRequest,
+  ensureTaskBranch,
   getChangeSummary,
   getRepoBranches,
   hasBase,
+  hasOpenPullRequest,
   pushBranch,
   RepoBranches,
   stageAllChanges,
@@ -41,6 +42,14 @@ import { buildCommitFromDiff } from "./commitMessage";
 import { runProjectCodeReview } from "./codeReview";
 import { previewCardImage } from "./imagePreview";
 import { resolveCodeReviewRunner } from "./projectManifest";
+import {
+  addCatalogBoard,
+  linkCatalogBoard,
+  readBoardCatalog,
+  removeCatalogBoard,
+  syncBoardCatalog,
+  unusedTrelloBoards,
+} from "./boardConfig";
 import { buildFinishCardComment } from "./finishComment";
 import {
   clearCompanionPath,
@@ -78,10 +87,60 @@ function reportError(context: string, error: unknown) {
   });
 }
 
-async function pickListId(token: string) {
-  let boards;
+async function startPickedCard(
+  picked: { id: string; label: string; desc?: string; ruc?: string },
+  listId: string,
+  token: string,
+  developer: string,
+  globalState: vscode.Memento,
+  workspaceState: vscode.Memento,
+  treeProvider: TrelloTreeProvider
+) {
+  const { modulo, submodulo } = parseCardMeta(picked.desc ?? "");
+  if (!modulo || !submodulo) {
+    vscode.window.showErrorMessage(
+      "La tarjeta debe tener 'Modulo:' y 'Submodulo:' en la descripción."
+    );
+    return;
+  }
+
+  const defaultBranchName =
+    `${developer}/${toPascalCase(modulo)}-${toPascalCase(submodulo)}`;
+
   try {
-    boards = await vscode.window.withProgress(
+    const moved = await moveCardToNextList(
+      TRELLO_APP_KEY,
+      token,
+      picked.id,
+      listId
+    );
+    trace(`Tarjeta movida: ${moved.from.name} → ${moved.to.name}`);
+
+    await saveActiveTask(globalState, {
+      cardId: picked.id,
+      cardName: picked.label,
+      cardDesc: picked.desc ?? "",
+      branchName: defaultBranchName,
+      originListId: listId,
+      cardRuc: picked.ruc,
+      repos: [],
+      startedAt: new Date().toISOString(),
+    });
+    await workspaceState.update("trelloBranch.activeTask", undefined);
+    treeProvider.refresh();
+
+    vscode.window.showInformationMessage(
+      `Tarea activa: "${picked.label}". Trabaja los cambios; al terminar ` +
+        `se detectan los repos con cambios (este y el companion).`
+    );
+  } catch (moveError) {
+    reportError("No se pudo mover la tarjeta", moveError);
+  }
+}
+
+async function loadTrelloBoards(token: string) {
+  try {
+    return await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: "Cargando tableros de Trello..." },
       () => getBoards(TRELLO_APP_KEY, token)
     );
@@ -89,75 +148,58 @@ async function pickListId(token: string) {
     reportError("No se pudieron obtener los tableros", error);
     return undefined;
   }
+}
 
-  trace(`Tableros recibidos: ${boards.length}`);
+async function pickTrelloBoard(
+  token: string,
+  title: string,
+  excludeIds: string[] = []
+) {
+  const boards = await loadTrelloBoards(token);
+  if (!boards) {
+    return undefined;
+  }
   if (boards.length === 0) {
     vscode.window.showInformationMessage("No se encontraron tableros en tu cuenta de Trello.");
     return undefined;
   }
-
-  const pickedBoard = await vscode.window.showQuickPick(
-    boards.map(b => ({ label: b.name, id: b.id })),
-    { title: "Paso 1 de 2: tablero", placeHolder: "Elige el tablero de Trello" }
+  const available = boards.filter(board => !excludeIds.includes(board.id));
+  if (available.length === 0) {
+    vscode.window.showInformationMessage("No hay más tableros de Trello para agregar.");
+    return undefined;
+  }
+  const picked = await vscode.window.showQuickPick(
+    available.map(board => ({ label: board.name, id: board.id })),
+    { title, placeHolder: "Elige el tablero de Trello" }
   );
-  if (!pickedBoard) {
-    trace("Selección de tablero cancelada.");
+  if (!picked) {
     return undefined;
   }
-  trace(`Tablero elegido: ${pickedBoard.label} (${pickedBoard.id})`);
-
-  let lists;
-  try {
-    lists = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: "Cargando listas..." },
-      () => getLists(TRELLO_APP_KEY, token, pickedBoard.id)
-    );
-  } catch (error) {
-    reportError("No se pudieron obtener las listas", error);
-    return undefined;
-  }
-
-  trace(`Listas recibidas: ${lists.length}`);
-  if (lists.length === 0) {
-    vscode.window.showInformationMessage(`El tablero "${pickedBoard.label}" no tiene listas.`);
-    return undefined;
-  }
-
-  const pickedList = await vscode.window.showQuickPick(
-    lists.map(l => ({ label: l.name, description: l.id, id: l.id })),
-    { title: "Paso 2 de 2: lista", placeHolder: `Elige la lista de ${pickedBoard.label}` }
-  );
-  if (!pickedList) {
-    trace("Selección de lista cancelada.");
-    return undefined;
-  }
-
-  await vscode.workspace.getConfiguration("trelloBranch")
-    .update("listId", pickedList.id, vscode.ConfigurationTarget.Global);
-  trace(`Lista guardada: ${pickedList.label} (${pickedList.id})`);
-  vscode.window.showInformationMessage(`Lista guardada: ${pickedList.label}`);
-  return pickedList.id;
+  return { id: picked.id, name: picked.label };
 }
 
 const BRANCH_NAME_PATTERN = /^(?!\/|.*\.\.|.*\/\/|.*@\{|.*\\)[^\s~^:?*\[\\]+(?<!\.|\/)$/;
 
-function branchExistsAnywhere(lists: RepoBranches[], name: string) {
-  return lists.some(b => branchExists(b, name));
-}
-
 async function resolveBranchName(
   defaultName: string,
-  branchLists: RepoBranches[]
+  repoPath: string,
+  branches: RepoBranches
 ): Promise<string | undefined> {
-  if (!branchExistsAnywhere(branchLists, defaultName)) {
+  if (!branchExists(branches, defaultName)) {
     return defaultName;
   }
 
-  trace(`La rama "${defaultName}" ya existe; pidiendo nombre alternativo.`);
+  const inUse = await hasOpenPullRequest(repoPath, defaultName);
+  if (!inUse) {
+    trace(`La rama "${defaultName}" ya existe y no está en uso; se ocupa.`);
+    return defaultName;
+  }
+
+  trace(`La rama "${defaultName}" tiene un PR abierto; pidiendo nombre alternativo.`);
 
   while (true) {
     const proposed = await vscode.window.showInputBox({
-      title: `La rama "${defaultName}" ya existe`,
+      title: `La rama "${defaultName}" está en uso (PR abierto)`,
       prompt: "Propón otro nombre de rama para esta tarea",
       value: defaultName,
       ignoreFocusOut: true,
@@ -169,7 +211,7 @@ async function resolveBranchName(
         if (!BRANCH_NAME_PATTERN.test(name)) {
           return "Nombre de rama inválido para git.";
         }
-        if (branchExistsAnywhere(branchLists, name)) {
+        if (branchExists(branches, name)) {
           return `La rama "${name}" ya existe (local o en origin).`;
         }
         return undefined;
@@ -181,10 +223,7 @@ async function resolveBranchName(
     }
 
     const name = proposed.trim();
-    if (
-      !branchExistsAnywhere(branchLists, name) &&
-      BRANCH_NAME_PATTERN.test(name)
-    ) {
+    if (!branchExists(branches, name) && BRANCH_NAME_PATTERN.test(name)) {
       return name;
     }
   }
@@ -357,15 +396,73 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.showInformationMessage("Sesión de Trello cerrada.");
   });
 
-  const selectList = vscode.commands.registerCommand("trelloBranch.selectList", async () => {
-    trace("Comando: Seleccionar lista");
+  const addBoard = vscode.commands.registerCommand("trelloBranch.addBoard", async () => {
+    trace("Comando: Agregar tablero");
     const session = await requireSession(secrets);
     if (!session) {
       return;
     }
-    await pickListId(session.token);
+    const trelloBoards = await loadTrelloBoards(session.token);
+    if (!trelloBoards) {
+      return;
+    }
+    const catalog = await syncBoardCatalog(globalState, trelloBoards);
+    const unused = unusedTrelloBoards(trelloBoards, catalog);
+    if (unused.length === 0) {
+      vscode.window.showInformationMessage("No hay más tableros de Trello para agregar.");
+      return;
+    }
+    const picked = await vscode.window.showQuickPick(
+      unused.map(board => ({ label: board.name, id: board.id })),
+      { title: "Agregar tablero", placeHolder: "Elige un tablero de Trello" }
+    );
+    if (!picked) {
+      return;
+    }
+    await addCatalogBoard(globalState, { id: picked.id, name: picked.label });
+    trace(`Tablero agregado: ${picked.label} (${picked.id})`);
     treeProvider.refresh();
+    vscode.window.showInformationMessage(`Tablero agregado: ${picked.label}`);
   });
+
+  const linkBoard = vscode.commands.registerCommand(
+    "trelloBranch.linkBoard",
+    async (boardKey?: string) => {
+      trace("Comando: Vincular tablero");
+      const session = await requireSession(secrets);
+      if (!session || !boardKey) {
+        return;
+      }
+      const catalog = readBoardCatalog(globalState);
+      const entry = catalog.find(board => board.key === boardKey);
+      if (!entry) {
+        return;
+      }
+      const picked = await pickTrelloBoard(
+        session.token,
+        `Vincular ${entry.name}`,
+        catalog.map(board => board.id).filter((id): id is string => Boolean(id))
+      );
+      if (!picked) {
+        return;
+      }
+      await linkCatalogBoard(globalState, boardKey, picked);
+      treeProvider.refresh();
+      vscode.window.showInformationMessage(`${entry.name} vinculado a ${picked.name}`);
+    }
+  );
+
+  const removeBoard = vscode.commands.registerCommand(
+    "trelloBranch.removeBoard",
+    async (boardKey?: string) => {
+      if (!boardKey) {
+        return;
+      }
+      await removeCatalogBoard(globalState, boardKey);
+      treeProvider.refresh();
+      vscode.window.showInformationMessage("Tablero quitado de la extensión.");
+    }
+  );
 
   const setCompanionRepo = vscode.commands.registerCommand(
     "trelloBranch.setCompanionRepo",
@@ -424,10 +521,14 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
-  const startTaskHandler = async (selectedCardId?: string) => {
+  const startTaskHandler = async (
+    selected?: string | { cardId?: string; listId?: string }
+  ) => {
     trace("Comando: Empezar tarea");
     const config = vscode.workspace.getConfiguration("trelloBranch");
-    let listId = config.get<string>("listId");
+    const selectedCardId =
+      typeof selected === "string" ? selected : selected?.cardId;
+    let listId = typeof selected === "object" ? selected?.listId : undefined;
 
     const session = await requireSession(secrets);
     if (!session) {
@@ -450,12 +551,117 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }
 
-    if (!listId || listId === "your-list-id") {
-      trace("Sin listId configurado: pidiendo tablero y lista.");
-      listId = await pickListId(token);
-      if (!listId) {
+    const trelloBoards = await loadTrelloBoards(token);
+    if (!trelloBoards) {
+      return;
+    }
+    const catalog = await syncBoardCatalog(globalState, trelloBoards);
+    const linked = catalog.filter(board => board.id);
+
+    if (!listId) {
+      if (linked.length === 0) {
+        vscode.window.showWarningMessage(
+          "Vincula BUGS o NUEVAS FUNCIONALIDADES, o agrega un tablero."
+        );
         return;
       }
+      const boardItem =
+        linked.length === 1
+          ? { label: linked[0].name, id: linked[0].id as string }
+          : await vscode.window.showQuickPick(
+              linked.map(board => ({
+                label: board.name,
+                description: board.builtin ? "por defecto" : "agregado",
+                id: board.id as string,
+              })),
+              {
+                title: "Tablero",
+                placeHolder: "Elige el tablero de la tarea",
+              }
+            );
+      if (!boardItem) {
+        return;
+      }
+      let cardsForBoard;
+      try {
+        cardsForBoard = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: "Cargando tus tareas asignadas...",
+          },
+          () =>
+            getAssignedCardsForBoard(
+              TRELLO_APP_KEY,
+              token,
+              boardItem.id,
+              member.id
+            )
+        );
+      } catch (error) {
+        reportError("No se pudieron obtener las tareas", error);
+        return;
+      }
+      listId = cardsForBoard.originList?.id;
+      const cards = cardsForBoard.cards;
+      trace(`Tarjetas asignadas en ${boardItem.label}: ${cards.length}`);
+      if (!listId || cards.length === 0) {
+        vscode.window.showInformationMessage(
+          `No hay tareas asignadas a ti en ${boardItem.label}.`
+        );
+        return;
+      }
+
+      const taskItems = cards.map(c => {
+        const meta = parseCardMeta(c.desc ?? "");
+        const descripcion = sanitizeForPr(meta.descripcion ?? "", meta.empresa);
+        const ejemplo = sanitizeForPr(meta.ejemplo ?? "", meta.empresa);
+        const detailParts = [
+          descripcion ? `Desc: ${descripcion.replace(/\s+/g, " ").slice(0, 140)}` : undefined,
+          ejemplo ? `Ej: ${ejemplo.replace(/\s+/g, " ").slice(0, 100)}` : undefined,
+          !meta.modulo || !meta.submodulo ? "Sin Modulo/Submodulo" : undefined,
+        ].filter(Boolean);
+        return {
+          label: c.name,
+          description: formatMetaLine(meta),
+          detail: detailParts.join(" · ") || undefined,
+          id: c.id,
+          desc: c.desc,
+          ruc: c.ruc,
+          idList: c.idList ?? listId,
+        };
+      });
+      const pickedCard = selectedCardId
+        ? taskItems.find(item => item.id === selectedCardId)
+        : await vscode.window.showQuickPick(taskItems, {
+            title: `Tus tareas en ${boardItem.label} (${cards.length})`,
+            placeHolder: "Selecciona la tarea con la que comenzarás",
+            matchOnDescription: true,
+            matchOnDetail: true,
+          });
+      if (!pickedCard) {
+        trace(
+          selectedCardId
+            ? `La tarea ${selectedCardId} ya no está disponible.`
+            : "Selección de tarea cancelada."
+        );
+        if (selectedCardId) {
+          vscode.window.showWarningMessage(
+            "La tarea ya no está disponible en el tablero seleccionado."
+          );
+          treeProvider.refresh();
+        }
+        return;
+      }
+      await startPickedCard(
+        pickedCard,
+        pickedCard.idList ?? listId,
+        token,
+        developer,
+        globalState,
+        workspaceState,
+        treeProvider
+      );
+      return;
     }
 
     let cards;
@@ -465,104 +671,31 @@ export function activate(context: vscode.ExtensionContext) {
           location: vscode.ProgressLocation.Notification,
           title: "Cargando tus tareas asignadas...",
         },
-        () => getAssignedCards(TRELLO_APP_KEY, token, listId!, member.id)
+        async () => {
+          const card = await getCard(TRELLO_APP_KEY, token, selectedCardId!);
+          return [card];
+        }
       );
     } catch (error) {
       reportError("No se pudieron obtener las tareas", error);
       return;
     }
 
-    trace(`Tarjetas asignadas a ti: ${cards.length}`);
-    if (cards.length === 0) {
-      const action = await vscode.window.showInformationMessage(
-        "No hay tareas asignadas a ti en esta lista.",
-        "Elegir otra lista"
-      );
-      if (action) {
-        await vscode.commands.executeCommand("trelloBranch.selectList");
-      }
-      return;
-    }
-
-    const taskItems = cards.map(c => {
-      const meta = parseCardMeta(c.desc ?? "", { ruc: c.ruc });
-      const descripcion = sanitizeForPr(meta.descripcion ?? "", meta.empresa);
-      const ejemplo = sanitizeForPr(meta.ejemplo ?? "", meta.empresa);
-      const detailParts = [
-        descripcion ? `Desc: ${descripcion.replace(/\s+/g, " ").slice(0, 140)}` : undefined,
-        ejemplo ? `Ej: ${ejemplo.replace(/\s+/g, " ").slice(0, 100)}` : undefined,
-        !meta.modulo || !meta.submodulo ? "Sin Modulo/Submodulo" : undefined,
-      ].filter(Boolean);
-      return {
-        label: c.name,
-        description: formatMetaLine(meta),
-        detail: detailParts.join(" · ") || undefined,
-        id: c.id,
-        desc: c.desc,
-        ruc: c.ruc,
-      };
-    });
-    const picked = selectedCardId
-      ? taskItems.find(item => item.id === selectedCardId)
-      : await vscode.window.showQuickPick(taskItems, {
-          title: `Tus tareas asignadas (${cards.length})`,
-          placeHolder: "Selecciona la tarea con la que comenzarás",
-          matchOnDescription: true,
-          matchOnDetail: true,
-        });
-    if (!picked) {
-      trace(
-        selectedCardId
-          ? `La tarea ${selectedCardId} ya no está disponible.`
-          : "Selección de tarea cancelada."
-      );
-      if (selectedCardId) {
-        vscode.window.showWarningMessage(
-          "La tarea ya no está disponible en la lista seleccionada."
-        );
-        treeProvider.refresh();
-      }
-      return;
-    }
-    trace(`Tarea elegida: ${picked.label}`);
-
-    const { modulo, submodulo } = parseCardMeta(picked.desc ?? "");
-    if (!modulo || !submodulo) {
-      vscode.window.showErrorMessage(
-        "La tarjeta debe tener 'Modulo:' y 'Submodulo:' en la descripción."
-      );
-      return;
-    }
-
-    const defaultBranchName =
-      `${developer}/${toPascalCase(modulo)}-${toPascalCase(submodulo)}`;
-
-    try {
-      const moved = await moveCardToNextList(
-        TRELLO_APP_KEY, token, picked.id, listId!
-      );
-      trace(`Tarjeta movida: ${moved.from.name} → ${moved.to.name}`);
-
-      await saveActiveTask(globalState, {
-        cardId: picked.id,
-        cardName: picked.label,
-        cardDesc: picked.desc ?? "",
-        branchName: defaultBranchName,
-        originListId: listId,
-        cardRuc: picked.ruc,
-        repos: [],
-        startedAt: new Date().toISOString(),
-      });
-      await workspaceState.update("trelloBranch.activeTask", undefined);
-      treeProvider.refresh();
-
-      vscode.window.showInformationMessage(
-        `Tarea activa: "${picked.label}". Trabaja los cambios; al terminar ` +
-          `se detectan los repos con cambios (este y el companion).`
-      );
-    } catch (moveError) {
-      reportError("No se pudo mover la tarjeta", moveError);
-    }
+    const picked = {
+      label: cards[0].name,
+      id: cards[0].id,
+      desc: cards[0].desc,
+      ruc: cards[0].ruc,
+    };
+    await startPickedCard(
+      picked,
+      listId,
+      token,
+      developer,
+      globalState,
+      workspaceState,
+      treeProvider
+    );
   };
 
   const startTask = vscode.commands.registerCommand(
@@ -726,7 +859,11 @@ export function activate(context: vscode.ExtensionContext) {
       trace(`Repo omitido en esta ventana: ${activeRepo.label}`);
     } else {
       const currentBranches = await getRepoBranches(currentRoot);
-      const branchName = await resolveBranchName(active.branchName, [currentBranches]);
+      const branchName = await resolveBranchName(
+        active.branchName,
+        currentRoot,
+        currentBranches
+      );
       if (!branchName) {
         trace("Creación de rama cancelada al terminar.");
         return;
@@ -738,10 +875,14 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       try {
-        await createBranchFromCurrent(currentRoot, branchName);
-        trace(`Rama creada: ${branchName} en ${currentRoot}`);
+        const branchAction = await ensureTaskBranch(currentRoot, branchName);
+        trace(
+          branchAction === "created"
+            ? `Rama creada: ${branchName} en ${currentRoot}`
+            : `Rama ocupada: ${branchName} en ${currentRoot} (${branchAction})`
+        );
       } catch (error) {
-        reportError("No se pudo crear la rama", error);
+        reportError("No se pudo usar la rama de la tarea", error);
         return;
       }
 
@@ -929,19 +1070,6 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      const donePrs = active.repos.filter(r => r.prUrl);
-      const warning = donePrs.length
-        ? ` Hay ${donePrs.length} PR(s) ya creados; no se cierran.`
-        : "";
-      const confirm = await vscode.window.showWarningMessage(
-        `¿Regresar "${active.cardName}" a la lista de origen?` + warning,
-        "Regresar",
-        "Cancelar"
-      );
-      if (confirm !== "Regresar") {
-        return;
-      }
-
       try {
         const card = await getCard(TRELLO_APP_KEY, session.token, active.cardId);
         let movedTo: string;
@@ -993,7 +1121,9 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     login,
     logout,
-    selectList,
+    addBoard,
+    linkBoard,
+    removeBoard,
     setCompanionRepo,
     clearCompanionRepo,
     startTask,

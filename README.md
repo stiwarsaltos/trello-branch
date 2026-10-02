@@ -7,7 +7,7 @@ Extensión para Cursor/VS Code que conecta tarjetas de Trello con ramas Git: emp
 1. Instala el `.vsix` (**Extensions: Install from VSIX…**).
 2. Abre un repo con `package.json` (front) o `composer.json` (API).
 3. Si la tarea toca API y cliente: en cada ventana usa **Trello: Configurar repo companion** (una vez por máquina; no va en `.vscode/settings.json`).
-4. En la vista **Trello Branch**: inicia sesión → elige lista → empieza una tarea (solo la tarjeta).
+4. En la vista **Trello Branch**: inicia sesión → tableros **BUGS** y **NUEVAS FUNCIONALIDADES** (puedes agregar más) → empieza una tarea.
 5. Trabaja los cambios en la rama actual (p. ej. `develop`), en API y/o cliente.
 6. Al terminar: se listan este repo y el companion; marcas cuáles tienen cambios de esta tarea → rama + code review + PR. La tarjeta avanza cuando esos repos están cerrados.
 
@@ -16,10 +16,10 @@ Extensión para Cursor/VS Code que conecta tarjetas de Trello con ramas Git: emp
 | Acción | Resultado |
 |--------|-----------|
 | Empezar tarea | Marca la tarjeta activa y la mueve; no elige repos ni crea ramas |
-| Regresar tarea | Devuelve la tarjeta a la lista de origen y limpia la tarea activa |
-| Rama ya existe | Al terminar, pide un nombre alternativo |
+| Regresar tarea | Devuelve la tarjeta a la lista de origen al instante, sin confirmar |
+| Rama ya existe | Si no tiene PR abierto, la ocupa; si está en uso, pide otro nombre |
 | Terminar tarea | Detecta cambios → rama + code review + PR. Al pasar la tarjeta: comentario Pull en front/back y Comando si hay uno nuevo |
-| Vista lateral | Cuenta, tarea activa (detalle + imágenes), lista y tareas asignadas |
+| Vista lateral | Cuenta, tarea activa, tableros (BUGS y NUEVAS FUNCIONALIDADES por defecto) y tareas asignadas |
 
 El RUC se lee del campo **RUC EMPRESA** en Amazing Fields (Power-Up), descomprimiendo el `pluginData` de Trello. No va en el PR.
 
@@ -35,9 +35,10 @@ El RUC se lee del campo **RUC EMPRESA** en Amazing Fields (Power-Up), descomprim
 
 | Setting | Uso |
 |---------|-----|
-| `trelloBranch.listId` | Lista de origen (también con **Trello: Seleccionar lista**) |
 | `trelloBranch.developerName` | Prefijo de rama; si vacío, primer nombre del perfil Trello |
 | `trelloBranch.baseBranch` | Rama base (default: `develop`) |
+
+**Tableros:** por defecto **BUGS** y **NUEVAS FUNCIONALIDADES** (se vinculan por nombre al tablero de Trello). **Trello: Agregar tablero** suma otros. Las tareas asignadas salen de la primera lista de cada tablero.
 
 **Repo companion (API + cliente):** comando **Trello: Configurar repo companion**. Se guarda en tu Cursor (globalState), asociado al repo abierto. Cada desarrollador configura su ruta local sin conflictos en git.
 

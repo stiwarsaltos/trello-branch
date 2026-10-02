@@ -25,10 +25,12 @@ export type CardMeta = {
 
 const DESCRIPCION = "desc\\w*ci[oó]n";
 const EJEMPLO = "ejemplos?";
-const EMPRESA = "(?:empresa|raz[oó]n\\s*social|cliente|compa[ñn][ií]a)";
+const EMPRESA =
+  "(?:empresa|nombre\\s+de\\s+la\\s+empresa|raz[oó]n\\s*social|cliente|compa[ñn][ií]a)";
 const RUC_LABEL = "r\\.?\\s*u\\.?\\s*c\\.?";
+const ID_LABEL = `(?:${RUC_LABEL}|identificaci[oó]n)`;
 const SECTION_LABELS =
-  `(?:m[oó]dulo|subm[oó]dulo|${DESCRIPCION}|${EJEMPLO}|${RUC_LABEL}|${EMPRESA})`;
+  `(?:m[oó]dulo|subm[oó]dulo|${DESCRIPCION}|${EJEMPLO}|${ID_LABEL}|${EMPRESA})`;
 
 function matchField(desc: string, label: string) {
   const pattern = new RegExp(
@@ -75,40 +77,167 @@ export function normalizeRuc(value: string | undefined) {
 }
 
 export function isRucEmpresaFieldName(name: string) {
-  const normalized = name
+  const normalized = normalizeFieldName(name);
+  return normalized === "ruc empresa" || normalized === "rucempresa";
+}
+
+export function isEmpresaFieldName(name: string) {
+  const normalized = normalizeFieldName(name);
+  return (
+    normalized === "empresa" ||
+    normalized === "nombre empresa" ||
+    normalized === "razon social" ||
+    normalized === "cliente"
+  );
+}
+
+function normalizeFieldName(name: string) {
+  return name
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/^_+/, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
-  return normalized === "ruc empresa" || normalized === "rucempresa";
 }
 
-function matchRuc(desc: string) {
-  const labeled = desc.match(
-    new RegExp(`\\b${RUC_LABEL}\\s*[:.\\-]?\\s*(\\d[\\d\\s.-]{8,16}\\d)`, "i")
+function extractIdFromText(text: string, allowLoose = false) {
+  const labeled = text.match(
+    new RegExp(
+      `\\b(?:${RUC_LABEL}|identificaci[oó]n|nit|c\\.?i\\.?)\\s*[:.\\-]?\\s*(\\d[\\d\\s.-]{8,16}\\d)`,
+      "i"
+    )
   );
-  const fromLabel = labeled?.[1] ? normalizeRuc(labeled[1]) : undefined;
-  if (fromLabel) {
-    return fromLabel;
+  if (labeled?.[1]) {
+    return normalizeRuc(labeled[1]);
   }
-  const field = matchField(desc, RUC_LABEL);
-  return field ? normalizeRuc(field) : undefined;
+  if (!allowLoose) {
+    return undefined;
+  }
+  const loose = text.match(/\d[\d\s.-]{8,16}\d/);
+  return loose ? normalizeRuc(loose[0]) : undefined;
+}
+
+/** Separa nombre de empresa y RUC/identificación si vienen en el mismo texto. */
+export function splitCompanyAndId(value: string | undefined) {
+  if (!value?.trim()) {
+    return {};
+  }
+  const text = value.replace(/\s+/g, " ").trim();
+  const identificacion = extractIdFromText(text, true);
+  let empresa = text;
+  if (identificacion) {
+    const digitsPattern = identificacion.split("").join("[\\s.-]*");
+    empresa = empresa
+      .replace(
+        new RegExp(
+          `(?:${RUC_LABEL}|identificaci[oó]n|nit|c\\.?i\\.?)\\s*[:.\\-]?\\s*${digitsPattern}`,
+          "i"
+        ),
+        ""
+      )
+      .replace(new RegExp(digitsPattern), "");
+  }
+  empresa = empresa.replace(/^[\s\-–,;:|/]+|[\s\-–,;:|/]+$/g, "").replace(/\s+/g, " ").trim();
+  if (identificacion && empresa === identificacion) {
+    empresa = "";
+  }
+  return {
+    empresa: empresa || undefined,
+    identificacion,
+  };
+}
+
+export function identificationLabel(id: string) {
+  return id.length === 13 ? "RUC" : "Identificación";
+}
+
+function plainCardText(desc: string) {
+  return (desc ?? "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ");
+}
+
+function looksLikeCompanyName(name: string) {
+  if (name.length < 2 || name.length > 80) {
+    return false;
+  }
+  if (
+    /\b(debe|deben|para|cuando|ajustar|agregar|crear|requiere|usuario|exportar|permitir)\b/i.test(
+      name
+    )
+  ) {
+    return false;
+  }
+  return /[a-záéíóúñ]{2,}/i.test(name);
+}
+
+function companyFromCardDescription(text: string) {
+  const fromEmpresa = splitCompanyAndId(matchField(text, EMPRESA));
+  const fromId = splitCompanyAndId(matchField(text, ID_LABEL));
+  const descripcion = sectionBody(text, DESCRIPCION) ?? bodyAfterLabels(text) ?? "";
+  const fromDescEmpresa = splitCompanyAndId(matchField(descripcion, EMPRESA));
+  const fromDescId = splitCompanyAndId(matchField(descripcion, ID_LABEL));
+
+  let empresa =
+    fromEmpresa.empresa ??
+    fromDescEmpresa.empresa ??
+    fromId.empresa ??
+    fromDescId.empresa;
+  let identificacion =
+    fromId.identificacion ??
+    fromDescId.identificacion ??
+    fromEmpresa.identificacion ??
+    fromDescEmpresa.identificacion ??
+    extractIdFromText(descripcion) ??
+    extractIdFromText(text);
+
+  if (!empresa || !identificacion) {
+    const block = `${matchField(text, EMPRESA) ?? ""}\n${descripcion}`;
+    for (const line of block.split("\n")) {
+      const cleaned = line.replace(/\*+/g, " ").replace(/\s+/g, " ").trim();
+      if (cleaned.length < 8 || cleaned.length > 180) {
+        continue;
+      }
+      const split = splitCompanyAndId(cleaned);
+      if (split.identificacion) {
+        identificacion = identificacion ?? split.identificacion;
+      }
+      if (split.empresa && looksLikeCompanyName(split.empresa)) {
+        empresa = empresa ?? split.empresa;
+      }
+      if (empresa && identificacion) {
+        break;
+      }
+    }
+  }
+
+  return { empresa, identificacion };
 }
 
 export function parseCardMeta(
   desc: string,
-  extras?: { ruc?: string }
+  extras?: { ruc?: string; empresa?: string }
 ): CardMeta {
-  const text = desc ?? "";
+  const text = plainCardText(desc ?? "");
+  const fromDesc = companyFromCardDescription(text);
+  const fromExtrasRuc = splitCompanyAndId(extras?.ruc);
+  const fromExtrasEmpresa = splitCompanyAndId(extras?.empresa);
   return {
     modulo: matchField(text, "m[oó]dulo"),
     submodulo: matchField(text, "subm[oó]dulo"),
     descripcion: sectionBody(text, DESCRIPCION) ?? bodyAfterLabels(text),
     ejemplo: sectionBody(text, EJEMPLO),
-    ruc: normalizeRuc(extras?.ruc) ?? matchRuc(text),
-    empresa: matchField(text, EMPRESA),
+    ruc:
+      fromDesc.identificacion ??
+      fromExtrasRuc.identificacion ??
+      fromExtrasEmpresa.identificacion,
+    empresa:
+      fromDesc.empresa ??
+      fromExtrasEmpresa.empresa ??
+      fromExtrasRuc.empresa,
   };
 }
 
@@ -259,7 +388,7 @@ export function sanitizeForPr(text: string, empresa?: string) {
     .replace(/<[^>]+>/g, " ")
     .replace(
       new RegExp(
-        `\\**[ \\t]*(?:${RUC_LABEL}|${EMPRESA})\\b[^:\\n]*:[^\\n]*`,
+        `\\**[ \\t]*(?:${ID_LABEL}|${EMPRESA})\\b[^:\\n]*:[^\\n]*`,
         "gi"
       ),
       ""
@@ -277,8 +406,8 @@ export function sanitizeForPr(text: string, empresa?: string) {
 
 /** Solo la sección Descripción de la tarjeta, sin imágenes ni datos de empresa. */
 export function descriptionForPr(desc: string) {
-  const text = desc ?? "";
-  const empresa = matchField(text, EMPRESA);
+  const text = plainCardText(desc ?? "");
+  const empresa = companyFromCardDescription(text).empresa;
   const explicit = sectionBody(text, DESCRIPCION);
   return sanitizeForPr(explicit ?? "", empresa);
 }
