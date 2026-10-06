@@ -1,8 +1,106 @@
-import { execFile } from "child_process";
-import { promisify } from "util";
+import axios from "axios";
 import simpleGit from "simple-git";
 
-const execFileAsync = promisify(execFile);
+const GITHUB_API = "https://api.github.com";
+
+export class GithubAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GithubAuthError";
+  }
+}
+
+export type GithubUser = {
+  login: string;
+  name: string;
+};
+
+export type GithubRepoRef = {
+  owner: string;
+  repo: string;
+};
+
+function githubHeaders(token: string) {
+  return {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${token}`,
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "trello-branch",
+  };
+}
+
+function githubApiError(error: unknown, fallback: string): never {
+  if (axios.isAxiosError(error)) {
+    const status = error.response?.status;
+    const data = error.response?.data as
+      | { message?: string; errors?: { message?: string }[] }
+      | undefined;
+    if (status === 401) {
+      throw new GithubAuthError("El token de GitHub no es válido o expiró.");
+    }
+    const blob = JSON.stringify(data ?? "");
+    if (status === 403 && /sso/i.test(blob)) {
+      throw new Error(
+        "El token no está autorizado para esta organización (SSO). Autoriza el token en GitHub."
+      );
+    }
+    const extra = data?.errors?.map(item => item.message).filter(Boolean).join("; ");
+    throw new Error(
+      data?.message ? `${data.message}${extra ? `: ${extra}` : ""}` : fallback
+    );
+  }
+  throw error instanceof Error ? error : new Error(fallback);
+}
+
+export function parseGithubRemote(url: string): GithubRepoRef | undefined {
+  const cleaned = url.trim().replace(/\/+$/, "").replace(/\.git$/i, "");
+  const ssh = cleaned.match(/^git@github\.com:([^/]+)\/(.+)$/i);
+  if (ssh) {
+    return { owner: ssh[1], repo: ssh[2].split("/")[0] };
+  }
+  const sshProto = cleaned.match(/^ssh:\/\/(?:git@)?github\.com\/([^/]+)\/(.+)$/i);
+  if (sshProto) {
+    return { owner: sshProto[1], repo: sshProto[2].split("/")[0] };
+  }
+  const http = cleaned.match(
+    /^(?:https?:\/\/|git:\/\/)(?:www\.)?github\.com\/([^/]+)\/(.+)$/i
+  );
+  if (http) {
+    return { owner: http[1], repo: http[2].split("/")[0] };
+  }
+  return undefined;
+}
+
+export async function resolveGithubRepo(repoPath: string): Promise<GithubRepoRef> {
+  const git = simpleGit(repoPath);
+  const remotes = await git.getRemotes(true);
+  const origin =
+    remotes.find(remote => remote.name === "origin") ?? remotes[0];
+  const url = origin?.refs.fetch || origin?.refs.push;
+  if (!url) {
+    throw new Error(`El repositorio ${repoPath} no tiene remote origin.`);
+  }
+  const ref = parseGithubRemote(url);
+  if (!ref) {
+    throw new Error(
+      `El remote "${url}" no es un repositorio de GitHub. ` +
+        `Los PR se crean contra github.com.`
+    );
+  }
+  return ref;
+}
+
+export async function getGithubUser(token: string): Promise<GithubUser> {
+  try {
+    const { data } = await axios.get<{ login: string; name?: string | null }>(
+      `${GITHUB_API}/user`,
+      { headers: githubHeaders(token) }
+    );
+    return { login: data.login, name: data.name?.trim() || data.login };
+  } catch (error) {
+    githubApiError(error, "No se pudo validar el token de GitHub.");
+  }
+}
 
 export type RepoBranches = {
   root: string;
@@ -91,19 +189,42 @@ export async function createLocalBranch(
   await git.checkoutLocalBranch(branchName);
 }
 
-/** True si hay un PR abierto con esa rama como head. */
-export async function hasOpenPullRequest(repoPath: string, headBranch: string) {
+type GithubPull = {
+  html_url: string;
+  number: number;
+};
+
+async function listOpenPulls(
+  token: string,
+  ref: GithubRepoRef,
+  headBranch: string
+) {
   try {
-    const { stdout } = await execFileAsync(
-      "gh",
-      ["pr", "list", "--head", headBranch, "--state", "open", "--json", "number"],
-      { cwd: repoPath }
+    const { data } = await axios.get<GithubPull[]>(
+      `${GITHUB_API}/repos/${ref.owner}/${ref.repo}/pulls`,
+      {
+        headers: githubHeaders(token),
+        params: {
+          head: `${ref.owner}:${headBranch}`,
+          state: "open",
+        },
+      }
     );
-    const prs = JSON.parse(stdout.trim() || "[]") as unknown[];
-    return Array.isArray(prs) && prs.length > 0;
-  } catch {
-    return false;
+    return Array.isArray(data) ? data : [];
+  } catch (error) {
+    githubApiError(error, "No se pudo consultar los pull requests abiertos.");
   }
+}
+
+/** True si hay un PR abierto con esa rama como head. */
+export async function hasOpenPullRequest(
+  repoPath: string,
+  headBranch: string,
+  githubToken: string
+) {
+  const ref = await resolveGithubRepo(repoPath);
+  const pulls = await listOpenPulls(githubToken, ref, headBranch);
+  return pulls.length > 0;
 }
 
 /**
@@ -251,31 +372,34 @@ export async function pushBranch(repoPath: string, branchName: string) {
 
 export async function createPullRequest(options: {
   repoPath: string;
+  githubToken: string;
   baseBranch: string;
   headBranch: string;
   title: string;
   body: string;
 }) {
-  const { repoPath, baseBranch, headBranch, title, body } = options;
+  const { repoPath, githubToken, baseBranch, headBranch, title, body } = options;
+  const ref = await resolveGithubRepo(repoPath);
+
   try {
-    const { stdout } = await execFileAsync(
-      "gh",
-      [
-        "pr", "create",
-        "--base", baseBranch,
-        "--head", headBranch,
-        "--title", title,
-        "--body", body,
-      ],
-      { cwd: repoPath }
+    const { data } = await axios.post<GithubPull>(
+      `${GITHUB_API}/repos/${ref.owner}/${ref.repo}/pulls`,
+      {
+        title,
+        head: `${ref.owner}:${headBranch}`,
+        base: baseBranch,
+        body,
+      },
+      { headers: githubHeaders(githubToken) }
     );
-    return stdout.trim();
+    return data.html_url;
   } catch (error) {
-    const err = error as { stderr?: string; message?: string };
-    throw new Error(
-      err.stderr?.trim() ||
-      err.message ||
-      "No se pudo crear el pull request. ¿Está instalado y autenticado `gh`?"
-    );
+    if (axios.isAxiosError(error) && error.response?.status === 422) {
+      const existing = await listOpenPulls(githubToken, ref, headBranch);
+      if (existing[0]?.html_url) {
+        return existing[0].html_url;
+      }
+    }
+    githubApiError(error, "No se pudo crear el pull request.");
   }
 }

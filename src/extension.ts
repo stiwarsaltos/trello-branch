@@ -7,6 +7,11 @@ import {
   resolveDeveloperName,
   TRELLO_APP_KEY,
 } from "./auth";
+import {
+  GITHUB_AUTH_PROVIDER,
+  loginWithGithub,
+  requireGithubSession,
+} from "./githubAuth";
 import { commentOnCard, getAssignedCardsForBoard, getBoards, getCard, getList, moveCard, moveCardToNextList, moveCardToPreviousList } from "./trello";
 import {
   branchExists,
@@ -17,6 +22,7 @@ import {
   ensureTaskBranch,
   getChangeSummary,
   getRepoBranches,
+  GithubAuthError,
   hasBase,
   hasOpenPullRequest,
   pushBranch,
@@ -26,14 +32,18 @@ import {
 import {
   ActiveRepo,
   ActiveTask,
+  ACTIVE_TASKS_FILE,
   allReposClosed,
-  clearActiveTask,
   findActiveRepo,
-  getActiveTask,
+  getActiveTasks,
+  hydrateActiveTaskStore,
+  initActiveTaskStore,
   pendingRepoLabels,
+  removeActiveTask,
   repoLabel,
   saveActiveTask,
   sameRepoRoot,
+  uniqueBranchName,
   updateActiveRepo,
 } from "./taskState";
 import { TrelloTreeProvider } from "./treeView";
@@ -104,8 +114,22 @@ async function startPickedCard(
     return;
   }
 
-  const defaultBranchName =
-    `${developer}/${toPascalCase(modulo)}-${toPascalCase(submodulo)}`;
+  const defaultBranchName = uniqueBranchName(
+    `${developer}/${toPascalCase(modulo)}-${toPascalCase(submodulo)}`,
+    getActiveTasks(globalState, workspaceState),
+    picked.id
+  );
+
+  const already = getActiveTasks(globalState, workspaceState).find(
+    task => task.cardId === picked.id
+  );
+  if (already) {
+    vscode.window.showInformationMessage(
+      `"${picked.label}" ya está en curso. Termínala o regrésala desde su nodo.`
+    );
+    treeProvider.refresh();
+    return;
+  }
 
   try {
     const moved = await moveCardToNextList(
@@ -116,22 +140,27 @@ async function startPickedCard(
     );
     trace(`Tarjeta movida: ${moved.from.name} → ${moved.to.name}`);
 
-    await saveActiveTask(globalState, {
-      cardId: picked.id,
-      cardName: picked.label,
-      cardDesc: picked.desc ?? "",
-      branchName: defaultBranchName,
-      originListId: listId,
-      cardRuc: picked.ruc,
-      repos: [],
-      startedAt: new Date().toISOString(),
-    });
-    await workspaceState.update("trelloBranch.activeTask", undefined);
+    await saveActiveTask(
+      globalState,
+      {
+        cardId: picked.id,
+        cardName: picked.label,
+        cardDesc: picked.desc ?? "",
+        branchName: defaultBranchName,
+        originListId: listId,
+        cardRuc: picked.ruc,
+        repos: [],
+        startedAt: new Date().toISOString(),
+      },
+      workspaceState
+    );
     treeProvider.refresh();
 
+    const openCount = getActiveTasks(globalState, workspaceState).length;
     vscode.window.showInformationMessage(
-      `Tarea activa: "${picked.label}". Trabaja los cambios; al terminar ` +
-        `se detectan los repos con cambios (este y el companion).`
+      `Tarea en curso: "${picked.label}".` +
+        (openCount > 1 ? ` Llevas ${openCount} tareas a la vez.` : "") +
+        ` Trabaja los cambios; al terminar se detectan los repos (este y el companion).`
     );
   } catch (moveError) {
     reportError("No se pudo mover la tarjeta", moveError);
@@ -180,16 +209,38 @@ async function pickTrelloBoard(
 
 const BRANCH_NAME_PATTERN = /^(?!\/|.*\.\.|.*\/\/|.*@\{|.*\\)[^\s~^:?*\[\\]+(?<!\.|\/)$/;
 
+async function pickOpenTask(
+  tasks: ActiveTask[],
+  title: string
+): Promise<ActiveTask | undefined> {
+  if (tasks.length === 0) {
+    return undefined;
+  }
+  if (tasks.length === 1) {
+    return tasks[0];
+  }
+  const picked = await vscode.window.showQuickPick(
+    tasks.map(task => ({
+      label: task.cardName,
+      description: task.branchName,
+      task,
+    })),
+    { title, placeHolder: "Elige la tarea (no afecta a las demás)" }
+  );
+  return picked?.task;
+}
+
 async function resolveBranchName(
   defaultName: string,
   repoPath: string,
-  branches: RepoBranches
+  branches: RepoBranches,
+  githubToken: string
 ): Promise<string | undefined> {
   if (!branchExists(branches, defaultName)) {
     return defaultName;
   }
 
-  const inUse = await hasOpenPullRequest(repoPath, defaultName);
+  const inUse = await hasOpenPullRequest(repoPath, defaultName, githubToken);
   if (!inUse) {
     trace(`La rama "${defaultName}" ya existe y no está en uso; se ocupa.`);
     return defaultName;
@@ -365,12 +416,28 @@ function buildPrBody(active: ActiveTask) {
 
 export function activate(context: vscode.ExtensionContext) {
   const { secrets, workspaceState, globalState } = context;
+  initActiveTaskStore(context.globalStorageUri);
+  hydrateActiveTaskStore(globalState, workspaceState);
   const treeProvider = new TrelloTreeProvider(context);
   const treeView = vscode.window.createTreeView("trelloBranch.tasks", {
     treeDataProvider: treeProvider,
     showCollapseAll: true,
   });
   trace("Extensión activada.");
+
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleRefresh = () => {
+    if (refreshTimer) {
+      clearTimeout(refreshTimer);
+    }
+    refreshTimer = setTimeout(() => treeProvider.refresh(), 150);
+  };
+
+  const tasksPattern = new vscode.RelativePattern(
+    context.globalStorageUri,
+    ACTIVE_TASKS_FILE
+  );
+  const tasksWatcher = vscode.workspace.createFileSystemWatcher(tasksPattern);
 
   const login = vscode.commands.registerCommand("trelloBranch.login", async () => {
     trace("Comando: Iniciar sesión");
@@ -395,6 +462,37 @@ export function activate(context: vscode.ExtensionContext) {
     treeProvider.refresh();
     vscode.window.showInformationMessage("Sesión de Trello cerrada.");
   });
+
+  const githubLogin = vscode.commands.registerCommand(
+    "trelloBranch.githubLogin",
+    async () => {
+      trace("Comando: GitHub iniciar sesión");
+      try {
+        const user = await loginWithGithub();
+        if (!user) {
+          return;
+        }
+        trace(`Sesión GitHub: ${user.name} (@${user.login})`);
+        treeProvider.refresh();
+        vscode.window.showInformationMessage(
+          `GitHub conectado como ${user.name} (@${user.login})`
+        );
+      } catch (error) {
+        reportError("No se pudo iniciar sesión en GitHub", error);
+      }
+    }
+  );
+
+  const githubLogout = vscode.commands.registerCommand(
+    "trelloBranch.githubLogout",
+    async () => {
+      trace("Comando: GitHub cerrar sesión");
+      treeProvider.refresh();
+      vscode.window.showInformationMessage(
+        "GitHub se cierra desde Cuentas del editor (esquina inferior) → GitHub → Sign Out."
+      );
+    }
+  );
 
   const addBoard = vscode.commands.registerCommand("trelloBranch.addBoard", async () => {
     trace("Comando: Agregar tablero");
@@ -538,18 +636,6 @@ export function activate(context: vscode.ExtensionContext) {
     const { token, member } = session;
     const developer = resolveDeveloperName(member, config.get<string>("developerName"));
     trace(`Usuario: ${member.fullName} (@${member.username}) → prefijo rama: ${developer}`);
-
-    const existing = getActiveTask(globalState, workspaceState);
-    if (existing) {
-      const action = await vscode.window.showWarningMessage(
-        `Ya hay una tarea en curso: "${existing.cardName}".`,
-        "Continuar igual",
-        "Cancelar"
-      );
-      if (action !== "Continuar igual") {
-        return;
-      }
-    }
 
     const trelloBoards = await loadTrelloBoards(token);
     if (!trelloBoards) {
@@ -750,7 +836,9 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
-  const finishTask = vscode.commands.registerCommand("trelloBranch.finishTask", async () => {
+  const finishTask = vscode.commands.registerCommand(
+    "trelloBranch.finishTask",
+    async (payload?: { cardId?: string }) => {
     trace("Comando: Terminar tarea");
     const config = vscode.workspace.getConfiguration("trelloBranch");
     const baseBranch = config.get<string>("baseBranch") || "develop";
@@ -761,13 +849,19 @@ export function activate(context: vscode.ExtensionContext) {
     }
     const { token } = session;
 
-    let active = getActiveTask(globalState, workspaceState);
-    if (!active) {
+    const openTasks = getActiveTasks(globalState, workspaceState);
+    const pickedTask = payload?.cardId
+      ? openTasks.find(task => task.cardId === payload.cardId)
+      : await pickOpenTask(openTasks, "Terminar tarea");
+    if (!pickedTask) {
       vscode.window.showInformationMessage(
-        "No hay una tarea iniciada con la extensión. Empieza una con \"Trello: Empezar tarea\"."
+        openTasks.length
+          ? "No se eligió ninguna tarea."
+          : "No hay una tarea iniciada con la extensión. Empieza una con \"Trello: Empezar tarea\"."
       );
       return;
     }
+    let active: ActiveTask = pickedTask;
 
     const workspacePath = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
     if (!workspacePath) {
@@ -844,7 +938,7 @@ export function activate(context: vscode.ExtensionContext) {
       })),
     ];
     active = { ...active, repos: nextRepos };
-    await saveActiveTask(globalState, active);
+    await saveActiveTask(globalState, active, workspaceState);
     treeProvider.refresh();
 
     const activeRepo = findActiveRepo(active, currentRoot);
@@ -858,19 +952,55 @@ export function activate(context: vscode.ExtensionContext) {
     if (activeRepo.status === "skipped") {
       trace(`Repo omitido en esta ventana: ${activeRepo.label}`);
     } else {
-      const currentBranches = await getRepoBranches(currentRoot);
-      const branchName = await resolveBranchName(
-        active.branchName,
-        currentRoot,
-        currentBranches
+      const others = getActiveTasks(globalState, workspaceState).filter(
+        task => task.cardId !== active.cardId
       );
+      if (others.length) {
+        const go = await vscode.window.showWarningMessage(
+          `Hay ${others.length} tarea(s) más en curso. Este cierre es solo de "${active.cardName}". ` +
+            `Los cambios actuales de este repo irán a su rama.`,
+          "Seguir",
+          "Cancelar"
+        );
+        if (go !== "Seguir") {
+          return;
+        }
+      }
+
+      let github: Awaited<ReturnType<typeof requireGithubSession>>;
+      try {
+        github = await requireGithubSession();
+      } catch (error) {
+        reportError("No se pudo usar GitHub del editor", error);
+        return;
+      }
+      if (!github) {
+        return;
+      }
+
+      let branchName: string | undefined;
+      try {
+        const currentBranches = await getRepoBranches(currentRoot);
+        branchName = await resolveBranchName(
+          active.branchName,
+          currentRoot,
+          currentBranches,
+          github.token
+        );
+      } catch (error) {
+        if (error instanceof GithubAuthError) {
+          await loginWithGithub({ forceNewSession: true }).catch(() => undefined);
+        }
+        reportError("No se pudo comprobar si la rama ya tiene un PR", error);
+        return;
+      }
       if (!branchName) {
         trace("Creación de rama cancelada al terminar.");
         return;
       }
       if (branchName !== active.branchName) {
         active = { ...active, branchName };
-        await saveActiveTask(globalState, active);
+        await saveActiveTask(globalState, active, workspaceState);
         trace(`Nombre de rama actualizado: ${branchName}`);
       }
 
@@ -958,6 +1088,7 @@ export function activate(context: vscode.ExtensionContext) {
 
             prUrl = await createPullRequest({
               repoPath: currentRoot,
+              githubToken: github.token,
               baseBranch,
               headBranch: taskSnapshot.branchName,
               title: taskSnapshot.cardName,
@@ -967,14 +1098,23 @@ export function activate(context: vscode.ExtensionContext) {
           }
         );
       } catch (error) {
+        if (error instanceof GithubAuthError) {
+          await loginWithGithub({ forceNewSession: true }).catch(() => undefined);
+        }
         reportError("No se pudo completar commit/push/PR", error);
         return;
       }
 
-      active = await updateActiveRepo(globalState, taskSnapshot, currentRoot, {
-        status: "done",
-        prUrl,
-      });
+      active = await updateActiveRepo(
+        globalState,
+        taskSnapshot,
+        currentRoot,
+        {
+          status: "done",
+          prUrl,
+        },
+        workspaceState
+      );
 
       if (prUrl?.startsWith("http")) {
         vscode.window.showInformationMessage(`PR creado: ${prUrl}`, "Abrir").then(action => {
@@ -1030,6 +1170,9 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }
 
+    const stillOpen = getActiveTasks(globalState, workspaceState).filter(
+      task => task.cardId !== active.cardId
+    );
     for (const repo of active.repos.filter(r => r.status === "done")) {
       try {
         await checkoutBranch(repo.root, baseBranch);
@@ -1047,26 +1190,36 @@ export function activate(context: vscode.ExtensionContext) {
       .map(r => `${r.label}: ${r.prUrl}`)
       .join(" · ");
 
-    await clearActiveTask(globalState, workspaceState);
+    await removeActiveTask(globalState, workspaceState, active.cardId);
     treeProvider.refresh();
     vscode.window.showInformationMessage(
       `Tarea terminada. Tarjeta en "${movedTo}".` +
-        (prSummary ? ` PRs: ${prSummary}` : "")
+        (prSummary ? ` PRs: ${prSummary}` : "") +
+        (stillOpen.length
+          ? ` Siguen en curso: ${stillOpen.map(t => t.cardName).join(", ")}.`
+          : "")
     );
   });
 
   const returnTask = vscode.commands.registerCommand(
     "trelloBranch.returnTask",
-    async () => {
+    async (payload?: { cardId?: string }) => {
       trace("Comando: Regresar tarea");
       const session = await requireSession(secrets);
       if (!session) {
         return;
       }
 
-      const active = getActiveTask(globalState, workspaceState);
+      const openTasks = getActiveTasks(globalState, workspaceState);
+      const active = payload?.cardId
+        ? openTasks.find(task => task.cardId === payload.cardId)
+        : await pickOpenTask(openTasks, "Regresar tarea");
       if (!active) {
-        vscode.window.showInformationMessage("No hay una tarea activa para regresar.");
+        vscode.window.showInformationMessage(
+          openTasks.length
+            ? "No se eligió ninguna tarea."
+            : "No hay una tarea activa para regresar."
+        );
         return;
       }
 
@@ -1101,10 +1254,14 @@ export function activate(context: vscode.ExtensionContext) {
           trace(`Tarjeta movida: ${moved.from.name} → ${moved.to.name}`);
         }
 
-        await clearActiveTask(globalState, workspaceState);
+        await removeActiveTask(globalState, workspaceState, active.cardId);
         treeProvider.refresh();
+        const remaining = getActiveTasks(globalState, workspaceState);
         vscode.window.showInformationMessage(
-          `Tarea regresada a "${movedTo}". Ya no está activa.`
+          `Tarea regresada a "${movedTo}". Ya no está activa.` +
+            (remaining.length
+              ? ` Siguen en curso: ${remaining.map(t => t.cardName).join(", ")}.`
+              : "")
         );
       } catch (error) {
         reportError("No se pudo regresar la tarjeta", error);
@@ -1119,8 +1276,34 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
+    vscode.authentication.onDidChangeSessions(event => {
+      if (event.provider.id === GITHUB_AUTH_PROVIDER) {
+        treeProvider.refresh();
+      }
+    }),
+    vscode.window.onDidChangeWindowState(state => {
+      if (state.focused) {
+        scheduleRefresh();
+      }
+    }),
+    treeView.onDidChangeVisibility(event => {
+      if (event.visible) {
+        scheduleRefresh();
+      }
+    }),
+    tasksWatcher,
+    tasksWatcher.onDidChange(scheduleRefresh),
+    tasksWatcher.onDidCreate(scheduleRefresh),
+    tasksWatcher.onDidDelete(scheduleRefresh),
+    { dispose: () => {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+      }
+    } },
     login,
     logout,
+    githubLogin,
+    githubLogout,
     addBoard,
     linkBoard,
     removeBoard,
