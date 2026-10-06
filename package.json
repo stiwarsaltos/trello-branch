@@ -3,7 +3,7 @@
   "displayName": "trello-branch",
   "publisher": "stiwarsaltos-dev",
   "description": "Conecta tarjetas de Trello con ramas Git: empezar tarea, code review, commit, push y PR.",
-  "version": "1.4.1",
+  "version": "1.6.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -26,6 +26,14 @@
       {
         "command": "trelloBranch.logout",
         "title": "Trello: Cerrar sesión"
+      },
+      {
+        "command": "trelloBranch.githubLogin",
+        "title": "GitHub: Iniciar sesión"
+      },
+      {
+        "command": "trelloBranch.githubLogout",
+        "title": "GitHub: Cerrar sesión"
       },
       {
         "command": "trelloBranch.startTask",
@@ -111,15 +119,6 @@
           "type": "string",
           "default": "develop",
           "description": "Rama base desde la que se crea la nueva rama"
-        },
-        "trelloBranch.githubToken": {
-          "type": "string"
-        },
-        "trelloBranch.repoOwner": {
-          "type": "string"
-        },
-        "trelloBranch.repoName": {
-          "type": "string"
         }
       }
     }
