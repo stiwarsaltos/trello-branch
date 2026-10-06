@@ -21,7 +21,7 @@ Extensión para Cursor/VS Code que conecta tarjetas de Trello con ramas Git: emp
 | Terminar tarea | Detecta cambios → rama + code review + PR. Al pasar la tarjeta: comentario Pull en front/back y Comando si hay uno nuevo |
 | Vista lateral | Cuenta, tareas en curso (varias a la vez), tableros y asignadas |
 
-Puedes tener **varias tareas en curso** (módulos distintos). Terminar o regresar una no borra ni mueve las otras. Si dos tarjetas pedirían la misma rama, la nueva lleva sufijo `-2`. Al terminar una, el repo vuelve a `develop` para la siguiente.
+Puedes tener **varias tareas en curso** (módulos distintos). Terminar o regresar una no borra ni mueve las otras. Si dos tarjetas pedirían la misma rama, la nueva lleva sufijo `-2`. Al terminar una, el repo vuelve a `develop` para la siguiente. La vista de otra ventana (front/API) se actualiza sola al enfocarla o al cambiar las tareas.
 
 El RUC se lee del campo **RUC EMPRESA** en Amazing Fields (Power-Up), descomprimiendo el `pluginData` de Trello. No va en el PR.
 

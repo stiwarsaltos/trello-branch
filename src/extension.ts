@@ -32,9 +32,12 @@ import {
 import {
   ActiveRepo,
   ActiveTask,
+  ACTIVE_TASKS_FILE,
   allReposClosed,
   findActiveRepo,
   getActiveTasks,
+  hydrateActiveTaskStore,
+  initActiveTaskStore,
   pendingRepoLabels,
   removeActiveTask,
   repoLabel,
@@ -413,12 +416,28 @@ function buildPrBody(active: ActiveTask) {
 
 export function activate(context: vscode.ExtensionContext) {
   const { secrets, workspaceState, globalState } = context;
+  initActiveTaskStore(context.globalStorageUri);
+  hydrateActiveTaskStore(globalState, workspaceState);
   const treeProvider = new TrelloTreeProvider(context);
   const treeView = vscode.window.createTreeView("trelloBranch.tasks", {
     treeDataProvider: treeProvider,
     showCollapseAll: true,
   });
   trace("Extensión activada.");
+
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleRefresh = () => {
+    if (refreshTimer) {
+      clearTimeout(refreshTimer);
+    }
+    refreshTimer = setTimeout(() => treeProvider.refresh(), 150);
+  };
+
+  const tasksPattern = new vscode.RelativePattern(
+    context.globalStorageUri,
+    ACTIVE_TASKS_FILE
+  );
+  const tasksWatcher = vscode.workspace.createFileSystemWatcher(tasksPattern);
 
   const login = vscode.commands.registerCommand("trelloBranch.login", async () => {
     trace("Comando: Iniciar sesión");
@@ -1262,6 +1281,25 @@ export function activate(context: vscode.ExtensionContext) {
         treeProvider.refresh();
       }
     }),
+    vscode.window.onDidChangeWindowState(state => {
+      if (state.focused) {
+        scheduleRefresh();
+      }
+    }),
+    treeView.onDidChangeVisibility(event => {
+      if (event.visible) {
+        scheduleRefresh();
+      }
+    }),
+    tasksWatcher,
+    tasksWatcher.onDidChange(scheduleRefresh),
+    tasksWatcher.onDidCreate(scheduleRefresh),
+    tasksWatcher.onDidDelete(scheduleRefresh),
+    { dispose: () => {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+      }
+    } },
     login,
     logout,
     githubLogin,

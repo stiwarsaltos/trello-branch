@@ -3,7 +3,7 @@
   "displayName": "trello-branch",
   "publisher": "stiwarsaltos-dev",
   "description": "Conecta tarjetas de Trello con ramas Git: empezar tarea, code review, commit, push y PR.",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 
@@ -33,6 +34,83 @@ type LegacyActiveTask = {
 
 const ACTIVE_TASKS_KEY = "trelloBranch.activeTasks";
 const LEGACY_ACTIVE_TASK_KEY = "trelloBranch.activeTask";
+export const ACTIVE_TASKS_FILE = "active-tasks.json";
+
+let storageDir: string | undefined;
+
+export function initActiveTaskStore(storageUri: vscode.Uri) {
+  storageDir = storageUri.fsPath;
+  try {
+    fs.mkdirSync(storageDir, { recursive: true });
+  } catch {
+    // El watcher y el próximo guardado reintentan.
+  }
+}
+
+function tasksFilePath() {
+  return storageDir ? path.join(storageDir, ACTIVE_TASKS_FILE) : undefined;
+}
+
+function readTasksFromDisk(): ActiveTask[] | undefined {
+  const file = tasksFilePath();
+  if (!file || !fs.existsSync(file)) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    if (!Array.isArray(parsed)) {
+      return undefined;
+    }
+    return parsed.filter(isActiveTask);
+  } catch {
+    return undefined;
+  }
+}
+
+function writeTasksToDisk(tasks: ActiveTask[]) {
+  const file = tasksFilePath();
+  if (!file || !storageDir) {
+    return;
+  }
+  try {
+    fs.mkdirSync(storageDir, { recursive: true });
+    fs.writeFileSync(file, `${JSON.stringify(tasks)}\n`, "utf8");
+  } catch {
+    // La otra ventana seguirá el memento o el próximo guardado.
+  }
+}
+
+function readTasksFromMemento(
+  globalState: vscode.Memento,
+  workspaceState?: vscode.Memento
+): ActiveTask[] {
+  const listed = globalState.get<ActiveTask[]>(ACTIVE_TASKS_KEY);
+  if (Array.isArray(listed)) {
+    return listed.filter(isActiveTask);
+  }
+
+  const current = globalState.get<ActiveTask>(LEGACY_ACTIVE_TASK_KEY);
+  if (isActiveTask(current)) {
+    return [current];
+  }
+
+  const legacy = workspaceState?.get<LegacyActiveTask>(LEGACY_ACTIVE_TASK_KEY);
+  if (!legacy?.repoRoot) {
+    return [];
+  }
+  return [fromLegacyWorkspace(legacy)];
+}
+
+/** Copia memento → archivo para que otras ventanas vean las tareas. */
+export function hydrateActiveTaskStore(
+  globalState: vscode.Memento,
+  workspaceState?: vscode.Memento
+) {
+  if (!storageDir || readTasksFromDisk() !== undefined) {
+    return;
+  }
+  writeTasksToDisk(readTasksFromMemento(globalState, workspaceState));
+}
 
 export function repoLabel(repoRoot: string) {
   return path.basename(repoRoot);
@@ -101,21 +179,11 @@ export function getActiveTasks(
   globalState: vscode.Memento,
   workspaceState?: vscode.Memento
 ): ActiveTask[] {
-  const listed = globalState.get<ActiveTask[]>(ACTIVE_TASKS_KEY);
-  if (Array.isArray(listed)) {
-    return listed.filter(isActiveTask);
+  const fromDisk = readTasksFromDisk();
+  if (fromDisk !== undefined) {
+    return fromDisk;
   }
-
-  const current = globalState.get<ActiveTask>(LEGACY_ACTIVE_TASK_KEY);
-  if (isActiveTask(current)) {
-    return [current];
-  }
-
-  const legacy = workspaceState?.get<LegacyActiveTask>(LEGACY_ACTIVE_TASK_KEY);
-  if (!legacy?.repoRoot) {
-    return [];
-  }
-  return [fromLegacyWorkspace(legacy)];
+  return readTasksFromMemento(globalState, workspaceState);
 }
 
 export function findActiveTask(
@@ -166,6 +234,7 @@ async function persistTasks(
   if (workspaceState) {
     await workspaceState.update(LEGACY_ACTIVE_TASK_KEY, undefined);
   }
+  writeTasksToDisk(tasks);
 }
 
 export async function removeActiveTask(
