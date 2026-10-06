@@ -1154,22 +1154,16 @@ export function activate(context: vscode.ExtensionContext) {
     const stillOpen = getActiveTasks(globalState, workspaceState).filter(
       task => task.cardId !== active.cardId
     );
-    if (stillOpen.length === 0) {
-      for (const repo of active.repos.filter(r => r.status === "done")) {
-        try {
-          await checkoutBranch(repo.root, baseBranch);
-          trace(`Checkout a ${baseBranch} en ${repo.root}`);
-        } catch (error) {
-          reportError(
-            `No se pudo volver a ${baseBranch} en ${repo.label}`,
-            error
-          );
-        }
+    for (const repo of active.repos.filter(r => r.status === "done")) {
+      try {
+        await checkoutBranch(repo.root, baseBranch);
+        trace(`Checkout a ${baseBranch} en ${repo.root}`);
+      } catch (error) {
+        reportError(
+          `No se pudo volver a ${baseBranch} en ${repo.label}`,
+          error
+        );
       }
-    } else {
-      trace(
-        `Otras tareas en curso (${stillOpen.map(t => t.cardName).join(", ")}); no se vuelve a ${baseBranch}.`
-      );
     }
 
     const prSummary = active.repos
