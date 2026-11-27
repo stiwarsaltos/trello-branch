@@ -38,6 +38,31 @@ const NOISE_IDENTS = new Set([
   "false",
   "null",
   "undefined",
+  "view",
+  "compact",
+  "response",
+  "request",
+  "redirect",
+  "abort",
+  "collect",
+  "json",
+  "where",
+  "with",
+  "load",
+  "first",
+  "find",
+  "save",
+  "create",
+  "update",
+  "delete",
+  "log",
+  "map",
+  "filter",
+  "foreach",
+  "trim",
+  "split",
+  "join",
+  "replace",
 ]);
 
 type CommitType =
@@ -86,38 +111,172 @@ function unique(values: string[]) {
   return [...new Set(values.filter(Boolean))];
 }
 
+export type CommitContext = {
+  module?: string;
+  submodule?: string;
+};
+
+/** Carpetas técnicas. No son el módulo del producto. */
+const GENERIC_SCOPE = new Set([
+  "app",
+  "src",
+  "http",
+  "https",
+  "api",
+  "controllers",
+  "controller",
+  "views",
+  "view",
+  "services",
+  "service",
+  "models",
+  "model",
+  "routes",
+  "route",
+  "resources",
+  "resource",
+  "components",
+  "component",
+  "pages",
+  "page",
+  "modules",
+  "module",
+  "features",
+  "feature",
+  "shared",
+  "common",
+  "core",
+  "lib",
+  "utils",
+  "helpers",
+  "domain",
+  "requests",
+  "middleware",
+  "database",
+  "migrations",
+  "migration",
+  "config",
+  "public",
+  "assets",
+  "js",
+  "ts",
+  "php",
+  "css",
+  "scss",
+  "html",
+  "blade",
+  "tests",
+  "test",
+  "spec",
+  "specs",
+  "e2e",
+  "ci",
+  "scripts",
+  "livewire",
+  "partials",
+  "layouts",
+  "includes",
+]);
+
+const SUBJECT_FILLER = new Set([
+  "add",
+  "update",
+  "remove",
+  "fix",
+  "change",
+  "and",
+  "in",
+  "the",
+  "a",
+  "an",
+  "of",
+  "for",
+  "to",
+  "with",
+]);
+
+function mostCommon(values: string[]) {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+}
+
+function joinModuleScope(moduleScope: string, submoduleScope: string) {
+  if (!moduleScope) {
+    return submoduleScope;
+  }
+  if (!submoduleScope) {
+    return moduleScope;
+  }
+  if (
+    submoduleScope === moduleScope ||
+    submoduleScope.startsWith(`${moduleScope}-`)
+  ) {
+    return submoduleScope;
+  }
+  if (
+    moduleScope.startsWith(`${submoduleScope}-`) ||
+    moduleScope.endsWith(`-${submoduleScope}`)
+  ) {
+    return moduleScope;
+  }
+  const moduleParts = new Set(moduleScope.split("-"));
+  const extra = submoduleScope
+    .split("-")
+    .filter(part => !moduleParts.has(part));
+  return extra.length ? `${moduleScope}-${extra.join("-")}` : moduleScope;
+}
+
+/** Scope del módulo de la tarjeta (Modulo / Submodulo), en inglés. */
+export function scopeFromModule(context?: CommitContext) {
+  const moduleScope = context?.module ? toEnglishKebab(context.module) : "";
+  const submoduleScope = context?.submodule
+    ? toEnglishKebab(context.submodule)
+    : "";
+  const scope = joinModuleScope(moduleScope, submoduleScope)
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  if (!scope || GENERIC_SCOPE.has(scope)) {
+    return undefined;
+  }
+  return scope;
+}
+
+function meaningfulDirs(file: string) {
+  return posix(file)
+    .split("/")
+    .slice(0, -1)
+    .map(dir => toEnglishKebab(dir))
+    .filter(dir => dir && !GENERIC_SCOPE.has(dir) && dir.length > 1);
+}
+
 function inferScope(files: string[]) {
   const paths = files.map(posix);
-  const rules: [RegExp, string][] = [
-    [/(^|\/)e2e\//, "e2e"],
-    [/(^|\/)\.github\//, "ci"],
-    [/(^|\/)scripts\//, "ci"],
-    [/(^|\/)controllers?\//, "controllers"],
-    [/(^|\/)views?\//, "views"],
-    [/(^|\/)services?\//, "services"],
-    [/(^|\/)models?\//, "models"],
-    [/(^|\/)routes?\//, "routes"],
-    [/(^|\/)migrations?\//, "migrations"],
-    [/middleware/, "middleware"],
-    [/(^|\/)(tests?|specs?)\//, "test"],
-  ];
-  for (const [pattern, scope] of rules) {
-    if (paths.some(file => pattern.test(file))) {
-      return scope;
-    }
+  const every = (re: RegExp) => paths.length > 0 && paths.every(file => re.test(file));
+  if (every(/(^|\/)e2e\//i)) {
+    return "e2e";
   }
-  const dirs = paths
-    .map(file => path.posix.basename(path.posix.dirname(file)))
-    .filter(dir => dir && dir !== "." && dir !== "/");
-  if (!dirs.length) {
+  if (every(/(^|\/)\.github\//) || every(/(^|\/)scripts\//)) {
+    return "ci";
+  }
+  if (every(/(^|\/)migrations?\//i)) {
+    return "migrations";
+  }
+
+  const dirLists = paths.map(meaningfulDirs).filter(dirs => dirs.length > 0);
+  if (!dirLists.length) {
+    if (every(/(^|\/)(tests?|specs?)\//i) || every(/\.(spec|test)\./i)) {
+      return "test";
+    }
     return "app";
   }
-  const counts = new Map<string, number>();
-  for (const dir of dirs) {
-    counts.set(dir, (counts.get(dir) ?? 0) + 1);
-  }
-  const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
-  return toEnglishKebab(top) || "app";
+  return mostCommon(dirLists.map(dirs => dirs[0])) || "app";
+}
+
+function commitScope(files: string[], context?: CommitContext) {
+  return scopeFromModule(context) || inferScope(files);
 }
 
 function inferType(files: string[], insights: DiffInsights): CommitType {
@@ -171,6 +330,7 @@ function namesFromLine(line: string) {
     /(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_][\w]*)\s*=>/g,
     /(\w+)\s*:\s*(?:async\s*)?function\s*\(/g,
     /(?:public|private|protected|static)\s+function\s+(\w+)/g,
+    /->(\w+)\s*\(/g,
     /(?:class|interface|trait|enum)\s+(\w+)/g,
     /\$scope\.(\w+)/g,
     /(?:ng-model|ng-click|ng-change|ng-if)="([^"(]+)/g,
@@ -382,17 +542,74 @@ function bodyFromInsights(insights: DiffInsights) {
   return lines.join("\n");
 }
 
-export function fallbackCommitMessage(staged: StagedChangeSet) {
+const GENERIC_SUBJECT =
+  /\b(update|improve|implement)\s+(project\s+)?(files?|behavior|code|module|controllers?|views?)\b/i;
+
+const GENERIC_SUBJECT_WORDS = new Set([
+  ...GENERIC_SCOPE,
+  "behavior",
+  "code",
+  "class",
+  "classes",
+  "function",
+  "functions",
+  "method",
+  "methods",
+  "index",
+]);
+
+function isGenericSubject(subject: string) {
+  if (GENERIC_SUBJECT.test(subject)) {
+    return true;
+  }
+  const words = subject
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(word => word && !SUBJECT_FILLER.has(word));
+  return words.length > 0 && words.every(word => GENERIC_SUBJECT_WORDS.has(word));
+}
+
+function subjectOf(header: string) {
+  return header.replace(
+    /^(?:feat|fix|refactor|style|chore|test|docs|perf|ci|build)(?:\([^)]*\))?:\s*/,
+    ""
+  );
+}
+
+function specificSubject(subject: string, scope: string) {
+  if (!isGenericSubject(subject)) {
+    return subject;
+  }
+  const area = scope.replace(/-/g, " ").trim();
+  if (!area || area === "app" || isGenericSubject(`update ${area}`)) {
+    return subject;
+  }
+  const verb =
+    subject.match(/^(add|remove|fix|update)\b/i)?.[1]?.toLowerCase() ?? "update";
+  return `${verb} ${area}`;
+}
+
+export function fallbackCommitMessage(
+  staged: StagedChangeSet,
+  context?: CommitContext
+) {
   const insights = parseDiffInsights(staged.diff);
   const type = inferType(staged.files, insights);
-  const scope = inferScope(staged.files);
+  const scope = commitScope(staged.files, context);
   const prefix = `${type}(${scope}): `;
-  const header = `${prefix}${clipSubject(prefix, subjectFromInsights(insights, staged))}`;
+  const subject = specificSubject(subjectFromInsights(insights, staged), scope);
+  const header = `${prefix}${clipSubject(prefix, subject)}`;
   const body = bodyFromInsights(insights);
   return body ? `${header}\n\n${body}` : header;
 }
 
-function commitPrompt(files: string[], diff: string, inventory: string[]) {
+function commitPrompt(
+  files: string[],
+  diff: string,
+  inventory: string[],
+  scope: string
+) {
   const truncated =
     diff.length > MAX_DIFF_CHARS
       ? `${diff.slice(0, MAX_DIFF_CHARS)}\n... [diff truncated]`
@@ -408,11 +625,12 @@ function commitPrompt(files: string[], diff: string, inventory: string[]) {
     "",
     "Rules:",
     "- Types: feat, fix, refactor, style, chore, test, docs, perf",
-    "- Scope from the code area (controllers, views, services, e2e, ci, api, ...)",
+    `- Scope MUST be exactly: ${scope}`,
+    "- That scope is the product module. Do not replace it with a technical folder (controllers, views, services, models, components, app, src)",
     "- The subject MUST summarize the inventory below (added/removed symbols and edited functions)",
     "- Do not invent filters, fields, endpoints, or features that are not in the inventory or diff",
-    "- Do not use the Trello card/task title",
-    "- Do not write generic subjects like \"update files\" or \"improve behavior\"",
+    "- Do not use the Trello card/task title as the subject",
+    "- Do not write generic subjects like \"update files\", \"update controllers\", \"update module\", or \"improve behavior\"",
     "- Imperative mood: add/fix/update/remove",
     "",
     "Change inventory (source of truth):",
@@ -435,9 +653,6 @@ function cleanCommitMessage(text: string) {
     .trim();
 }
 
-const GENERIC_SUBJECT =
-  /\b(update|improve|implement)\s+(project\s+)?(files?|behavior|code|module|controllers?|views?)\b/i;
-
 function tokensFromInsights(insights: DiffInsights, files: string[]) {
   return unique([
     ...insights.newNames,
@@ -447,7 +662,7 @@ function tokensFromInsights(insights: DiffInsights, files: string[]) {
   ])
     .flatMap(name => [name.toLowerCase(), englishIdent(name)])
     .map(token => token.toLowerCase())
-    .filter(token => token.length >= 4);
+    .filter(token => token.length >= 4 && !isGenericSubject(`update ${token}`));
 }
 
 function messageMatchesDiff(
@@ -455,7 +670,8 @@ function messageMatchesDiff(
   insights: DiffInsights,
   files: string[]
 ) {
-  if (!COMMIT_HEADER.test(text) || GENERIC_SUBJECT.test(text.split("\n")[0] ?? "")) {
+  const header = text.split("\n")[0] ?? "";
+  if (!COMMIT_HEADER.test(text) || isGenericSubject(subjectOf(header))) {
     return false;
   }
   const tokens = tokensFromInsights(insights, files);
@@ -464,6 +680,15 @@ function messageMatchesDiff(
   }
   const haystack = text.toLowerCase();
   return tokens.some(token => haystack.includes(token));
+}
+
+function enforceScope(message: string, scope: string) {
+  const [header, ...rest] = message.split("\n");
+  const next = header.replace(
+    /^(feat|fix|refactor|style|chore|test|docs|perf|ci|build)(?:\([^)]*\))?:/,
+    `$1(${scope}):`
+  );
+  return [next, ...rest].join("\n");
 }
 
 async function readAnthropicKey(repoPath: string) {
@@ -489,13 +714,14 @@ async function generateWithAnthropic(
   repoPath: string,
   files: string[],
   diff: string,
-  insights: DiffInsights
+  insights: DiffInsights,
+  scope: string
 ) {
   const apiKey = await readAnthropicKey(repoPath);
   if (!apiKey) {
     return undefined;
   }
-  const prompt = commitPrompt(files, diff, changeInventory(insights));
+  const prompt = commitPrompt(files, diff, changeInventory(insights), scope);
   const models = [ANTHROPIC_MODEL, ANTHROPIC_MODEL_FALLBACK];
   for (const model of models) {
     try {
@@ -520,7 +746,7 @@ async function generateWithAnthropic(
         .filter((block: { type?: string }) => block.type === "text")
         .map((block: { text?: string }) => block.text ?? "")
         .join("\n");
-      const cleaned = cleanCommitMessage(text);
+      const cleaned = enforceScope(cleanCommitMessage(text), scope);
       if (messageMatchesDiff(cleaned, insights, files)) {
         return cleaned;
       }
@@ -548,7 +774,8 @@ function pickChatModel(models: vscode.LanguageModelChat[]) {
 async function generateWithLanguageModel(
   files: string[],
   diff: string,
-  insights: DiffInsights
+  insights: DiffInsights,
+  scope: string
 ) {
   if (!vscode.lm?.selectChatModels) {
     return undefined;
@@ -564,7 +791,7 @@ async function generateWithLanguageModel(
     const response = await model.sendRequest(
       [
         vscode.LanguageModelChatMessage.User(
-          commitPrompt(files, diff, changeInventory(insights))
+          commitPrompt(files, diff, changeInventory(insights), scope)
         ),
       ],
       {},
@@ -574,7 +801,7 @@ async function generateWithLanguageModel(
     for await (const chunk of response.text) {
       text += chunk;
     }
-    const cleaned = cleanCommitMessage(text);
+    const cleaned = enforceScope(cleanCommitMessage(text), scope);
     return messageMatchesDiff(cleaned, insights, files) ? cleaned : undefined;
   } finally {
     clearTimeout(timer);
@@ -582,20 +809,23 @@ async function generateWithLanguageModel(
   }
 }
 
-/** Conventional Commits in English from the staged diff — not from the Trello card. */
+/** Conventional Commit en inglés. El scope es el módulo de la tarjeta; el asunto sale del diff. */
 export async function buildCommitFromDiff(
   staged: StagedChangeSet,
-  repoPath?: string
+  repoPath?: string,
+  context?: CommitContext
 ) {
-  const fallback = fallbackCommitMessage(staged);
+  const fallback = fallbackCommitMessage(staged, context);
   const insights = parseDiffInsights(staged.diff);
+  const scope = commitScope(staged.files, context);
   try {
     if (repoPath) {
       const fromAnthropic = await generateWithAnthropic(
         repoPath,
         staged.files,
         staged.diff,
-        insights
+        insights,
+        scope
       );
       if (fromAnthropic) {
         return fromAnthropic;
@@ -604,7 +834,8 @@ export async function buildCommitFromDiff(
     const fromLm = await generateWithLanguageModel(
       staged.files,
       staged.diff,
-      insights
+      insights,
+      scope
     );
     return fromLm || fallback;
   } catch {

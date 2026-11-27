@@ -46,12 +46,16 @@ El RUC se lee del campo **RUC EMPRESA** en Amazing Fields (Power-Up), descomprim
 
 ## Empaquetar
 
+Al fusionar en `main`, GitHub Actions genera el `.vsix` y lo publica en un Release con el tag de `version` en `package.json` (por ejemplo `v1.7.0`). Si ese tag ya existe, reemplaza el archivo.
+
+Descárgalo desde [Releases](https://github.com/stiwarsaltos/trello-branch/releases) e instálalo con **Extensions: Install from VSIX…**.
+
+Para armarlo en local:
+
 ```bash
 npm run package
 npx @vscode/vsce package
 ```
-
-Instala el `.vsix` generado con **Extensions: Install from VSIX…**.
 
 ## Notas
 
@@ -61,5 +65,5 @@ Instala el `.vsix` generado con **Extensions: Install from VSIX…**.
 - El `git push` sigue usando tus credenciales de Git (SSH o credential helper), no el token de la extensión.
 - Las imágenes de la tarea activa se pueden previsualizar desde el árbol.
 - Si el code review falla (exit ≠ 0), no se hace commit/push/PR.
-- El **commit** describe **los cambios del diff** (funciones/archivos añadidos o quitados), en Conventional Commits en inglés. El título de Trello no entra en el commit; sí va en el PR.
+- El **commit** usa el módulo de la tarjeta como scope (`feat(accounts-permissions): …`) y el asunto describe el diff, en inglés. El título de Trello no entra en el commit; sí va en el PR.
 - El **PR** usa el nombre de la tarjeta como título. La descripción del PR no incluye imágenes, Ejemplo, RUC ni datos de empresa.

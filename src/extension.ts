@@ -1075,9 +1075,11 @@ export function activate(context: vscode.ExtensionContext) {
           },
           async () => {
             const staged = await stageAllChanges(currentRoot);
+            const cardMeta = parseCardMeta(taskSnapshot.cardDesc ?? "");
             const commitMessage = await buildCommitFromDiff(
               staged,
-              currentRoot
+              currentRoot,
+              { module: cardMeta.modulo, submodule: cardMeta.submodulo }
             );
             await commitStaged(currentRoot, commitMessage);
             trace(

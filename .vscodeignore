@@ -1,5 +1,8 @@
 .vscode/**
+.github/**
 .vscode-test/**
+**/.DS_Store
+*.vsix
 out/**
 node_modules/**
 src/**
